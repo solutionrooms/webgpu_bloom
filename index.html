@@ -76,7 +76,7 @@
 
   <script type="module">
     import * as THREE from 'three';
-    import { Fn, uv, vec3, vec4, float, int, uniform, storage, mix, smoothstep } from 'three/tsl';
+    import { Fn, uv, vec3, vec4, float, int, uniform, storage, mix, smoothstep, instanceIndex } from 'three/tsl';
 
     const $ = (id) => document.getElementById(id);
 
@@ -171,6 +171,12 @@
     // Uniforms
     // ---------------------------------------------------------------------------
     const uN = uniform(float(N));
+    // Gray-Scott / diffusion constants (Karl Sims tutorial values — known-good).
+    const uDa = uniform(float(1.0));    // diffusion of A
+    const uDb = uniform(float(0.5));    // diffusion of B
+    const uDt = uniform(float(1.0));    // timestep (≤ 1.0)
+    const uFeed = uniform(float(0.0367)); // "mitosis" recipe (dividing blobs)
+    const uKill = uniform(float(0.0649));
 
     // ---------------------------------------------------------------------------
     // Display — full-screen quad whose colour reads the field storage buffer.
@@ -193,6 +199,55 @@
     scene.add(quad);
 
     // ---------------------------------------------------------------------------
+    // Reaction-diffusion compute (Gray-Scott + 9-point Laplacian).
+    // makeStep builds a kernel that reads `inp` and writes `out` (one RD step).
+    // We bake two directions (A→B and B→A) and run an EVEN number of steps per
+    // frame so the latest field always lands back in bufA (which display reads).
+    // ---------------------------------------------------------------------------
+    const Ni = int(N);
+    function makeStep(inp, out) {
+      const kernel = Fn(() => {
+        const i = int(instanceIndex);
+        const x = i.mod(Ni);
+        const y = i.div(Ni);
+        // toroidal (wrap-around) neighbour coords
+        const xl = x.add(Ni).sub(1).mod(Ni);
+        const xr = x.add(1).mod(Ni);
+        const yu = y.add(Ni).sub(1).mod(Ni);
+        const yd = y.add(1).mod(Ni);
+        const at = (xx, yy) => inp.element(yy.mul(Ni).add(xx));
+
+        const c  = at(x, y);
+        const l  = at(xl, y),  r  = at(xr, y);
+        const u  = at(x, yu),  d  = at(x, yd);
+        const ul = at(xl, yu), ur = at(xr, yu);
+        const dl = at(xl, yd), dr = at(xr, yd);
+
+        // 9-point Laplacian: -1·centre + 0.20·orthogonal + 0.05·diagonal
+        const lapA = c.x.mul(-1.0)
+          .add(l.x.add(r.x).add(u.x).add(d.x).mul(0.20))
+          .add(ul.x.add(ur.x).add(dl.x).add(dr.x).mul(0.05));
+        const lapB = c.y.mul(-1.0)
+          .add(l.y.add(r.y).add(u.y).add(d.y).mul(0.20))
+          .add(ul.y.add(ur.y).add(dl.y).add(dr.y).mul(0.05));
+
+        const A = c.x, B = c.y;
+        const reaction = A.mul(B).mul(B);
+        const innerA = lapA.mul(uDa).sub(reaction).add(uFeed.mul(A.oneMinus()));
+        const innerB = lapB.mul(uDb).add(reaction).sub(uKill.add(uFeed).mul(B));
+        const A2 = A.add(innerA.mul(uDt)).clamp(0.0, 1.0);
+        const B2 = B.add(innerB.mul(uDt)).clamp(0.0, 1.0);
+
+        out.element(i).assign(vec4(A2, B2, c.z, c.w));
+      });
+      return kernel().compute(CELLS);
+    }
+    const stepAB = makeStep(fA, fB);   // bufA → bufB
+    const stepBA = makeStep(fB, fA);   // bufB → bufA
+
+    let ITER = 8;                       // RD steps per frame — MUST be even (ends in bufA)
+
+    // ---------------------------------------------------------------------------
     // Resize
     // ---------------------------------------------------------------------------
     function onResize() {
@@ -205,13 +260,21 @@
     // Loop
     // ---------------------------------------------------------------------------
     function animate() {
+      for (let s = 0; s < ITER; s++) {
+        renderer.compute((s & 1) === 0 ? stepAB : stepBA);
+      }
       renderer.render(scene, camera);
     }
     renderer.setAnimationLoop(animate);
 
     // Expose for dev probing (removed before ship).
-    window.__bloom = { THREE, renderer, scene, camera, material, bufA, bufB, N };
-    console.log('[bloom] M1 field display OK — backend:', renderer.backend.isWebGPUBackend ? 'WebGPU' : 'other', 'grid', N);
+    window.__bloom = {
+      THREE, renderer, scene, camera, material, bufA, bufB, N,
+      uFeed, uKill, uDt,
+      setIter: (n) => { ITER = (n % 2 === 0) ? n : n + 1; return ITER; },
+      recipe: (f, k) => { uFeed.value = f; uKill.value = k; },
+    };
+    console.log('[bloom] M2 RD sim running — backend:', renderer.backend.isWebGPUBackend ? 'WebGPU' : 'other', 'grid', N, 'ITER', ITER);
   </script>
 </body>
 </html>
