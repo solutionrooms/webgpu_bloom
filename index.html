@@ -29,7 +29,23 @@
     #stats .ok { color: #7CFFB2; }
     #stats .bad { color: #ff8080; }
 
-    #score { top: 92px; left: 12px; width: 184px; display: flex; flex-direction: column; gap: 6px; }
+    #nutbar { height: 8px; border-radius: 4px; background: rgba(255,255,255,.08); overflow: hidden; margin-top: 2px; }
+    #nutfill { height: 100%; width: 100%; border-radius: 4px;
+      background: linear-gradient(90deg, #6fe3ff, #2aa6ff); transition: width .12s linear; }
+
+    /* Faction picker hidden — player is Coral; rivals are AI */
+    #factions { display: none; }
+
+    /* Win/lose banner */
+    #banner { position: fixed; inset: 0; display: none; place-items: center; z-index: 8;
+      background: rgba(3,5,9,.55); backdrop-filter: blur(3px); pointer-events: none; }
+    #banner.show { display: grid; }
+    #banner .card { text-align: center; padding: 28px 40px; border-radius: 16px;
+      background: rgba(10,15,24,.85); border: 1px solid rgba(140,180,240,.25);
+      font: 16px/1.5 system-ui, sans-serif; color: #cfe3ff; }
+    #banner h1 { margin: 0 0 6px; font-size: 30px; }
+
+    #score { top: 168px; left: 12px; width: 184px; display: flex; flex-direction: column; gap: 6px; }
     #score .bar { position: relative; height: 18px; border-radius: 5px; overflow: hidden;
       background: rgba(255,255,255,.06); }
     #score .fill { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: 5px; transition: width .25s ease; }
@@ -79,9 +95,12 @@
 
   <div id="hud">
     <div id="stats" class="panel">
-      <div class="row"><span>Backend</span><b id="backend">…</b></div>
-      <div class="row"><span>Grid</span><b id="grid">—</b></div>
+      <div class="row"><span>Time</span><b id="time">—</b></div>
+      <div class="row"><span>Nutrient</span><b id="nut">—</b></div>
+      <div id="nutbar"><div id="nutfill"></div></div>
+      <div class="row" style="margin-top:4px"><span>Grid</span><b id="grid">—</b></div>
       <div class="row"><span>GPU</span><b id="gpums">—</b></div>
+      <div class="row"><span>Backend</span><b id="backend">…</b></div>
     </div>
 
     <div id="score" class="panel"></div>
@@ -93,6 +112,13 @@
       <button data-brush="6">S</button>
       <button data-brush="12" class="sel">M</button>
       <button data-brush="24">L</button>
+    </div>
+  </div>
+
+  <div id="banner">
+    <div class="card">
+      <h1 id="banner-title">Victory</h1>
+      <p>Press <b>R</b> to play again</p>
     </div>
   </div>
 
@@ -298,24 +324,29 @@
         // neutral whose feed=0 kills them irreversibly — total collapse.)
         // Pure arithmetic (step/mix) — boolean select/AND/var-in-If proved
         // unreliable in this TSL build.
-        const effB = (n) => step(0.5, n.z).mul(n.y.add(1.0)).sub(1.0); // owned ? B : -1
-        let bestB = effB(c);
-        let gov = c.z;                            // governing owner
-        const consider = (n) => {
-          const e = effB(n);
-          const win = step(bestB, e);             // 1 if e >= bestB
-          gov = mix(gov, n.z, win);
-          bestB = mix(bestB, e, win);
-        };
-        consider(l); consider(r); consider(u); consider(d);
+        // --- ownership: flood-fill claim + majority-COUNT combat. Count of
+        // owned neighbours is RECIPE-INDEPENDENT, so distinct recipes stay
+        // balanced (no mass-wins steamroll). The centre counts itself → home
+        // advantage → stable, sticky boundaries that move only when a faction
+        // clearly surrounds a cell. A neutral cell next to a faction is claimed
+        // (flood-fill), giving wide recipe support so blooms grow (don't starve).
+        const own = (n, f) => step(f - 0.5, n.z).sub(step(f + 0.5, n.z)); // 1 if n owned by f
+        const cnt = (f) => own(c, f).add(own(l, f)).add(own(r, f)).add(own(u, f)).add(own(d, f));
+        const cnt1 = cnt(1), cnt2 = cnt(2), cnt3 = cnt(3);
+        const centerCnt = cnt1.mul(own(c, 1)).add(cnt2.mul(own(c, 2))).add(cnt3.mul(own(c, 3)));
+        let owner = c.z;                         // sticky default (home advantage)
+        let best = centerCnt;
+        let ge = step(best.add(0.5), cnt1); owner = mix(owner, float(1), ge); best = mix(best, cnt1, ge);
+        ge = step(best.add(0.5), cnt2);     owner = mix(owner, float(2), ge); best = mix(best, cnt2, ge);
+        ge = step(best.add(0.5), cnt3);     owner = mix(owner, float(3), ge); best = mix(best, cnt3, ge);
 
-        // recipe of the governing faction (cascade by id)
+        // recipe of the (new) owning faction — cascade by id
         let feed = uFeed[0];
         let kill = uKill[0];
         for (let k = 1; k < FACTIONS.length; k++) {
-          const ge = step(float(k - 0.5), gov);  // 1 when gov >= k
-          feed = mix(feed, uFeed[k], ge);
-          kill = mix(kill, uKill[k], ge);
+          const geK = step(float(k - 0.5), owner);
+          feed = mix(feed, uFeed[k], geK);
+          kill = mix(kill, uKill[k], geK);
         }
 
         const A = c.x, B = c.y;
@@ -325,12 +356,7 @@
         const A2 = A.add(innerA.mul(uDt)).clamp(0.0, 1.0);
         const B2 = B.add(innerB.mul(uDt)).clamp(0.0, 1.0);
 
-        // Owner is STICKY: a claimed cell keeps its faction (and thus its
-        // recipe) even when B momentarily dips, so the pattern can recover
-        // instead of decaying into neutral (feed=0) and dying. Territory is
-        // lost only by combat — an enemy front with higher B overwrites it
-        // above. (gov already folds in that combat result.)
-        out.element(i).assign(vec4(A2, B2, gov, c.w));
+        out.element(i).assign(vec4(A2, B2, owner, c.w));
       });
       return kernel().compute(CELLS);
     }
@@ -491,42 +517,156 @@
       }
     }
 
-    let lastScore = 0, scorePending = false;
+    let lastScore = 0, scorePending = false, scoreGen = 0;
     function maybeScore(nowMs) {
       if (scorePending || nowMs - lastScore < 330) return;
       lastScore = nowMs; scorePending = true;
+      const gen = scoreGen;                 // discard readbacks that span a restart
       renderer.compute(scoreFromA);
       renderer.getArrayBufferAsync(scoreBuf).then((ab) => {
+        scorePending = false;
+        if (gen !== scoreGen) return;
         const arr = new Float32Array(ab);
         const totals = new Array(K).fill(0);
         for (let t = 0; t < TILES; t++) for (let k = 0; k < K; k++) totals[k] += arr[t * K + k];
+        // A valid reduction counts every cell exactly once. During page-load
+        // shader compilation the readback can be empty/partial — reject those.
+        let sum = 0; for (let k = 0; k < K; k++) sum += totals[k];
+        if (Math.abs(sum - CELLS) > 1) return;
         updateScoreUI(totals);
-        scorePending = false;
       }).catch(() => { scorePending = false; });
     }
+
+    // ---------------------------------------------------------------------------
+    // GAME LAYER — nutrient economy, scripted AI, win/lose, restart
+    // ---------------------------------------------------------------------------
+    const PLAYER = 1;                  // player's faction (Coral); rivals are AI
+    const AIS = [2, 3];               // AI-controlled factions
+    const WIN_PCT = 55;              // win at ≥ this % of the field [knob]
+    const ROUND_SECS = 45;          // round timer (seconds) [knob]
+    const FULL_NEUTRAL = 0.02;      // field considered "full" below this neutral fraction
+    const NUT_MAX = 120, NUT_BASE = 12, NUT_PER_TERR = 26; // regen/sec = base + perTerr·frac
+    const SEED_COST = 22;           // nutrient/sec while seeding (× brush-area factor)
+    const AI_INTERVAL = 3.0;        // seconds between an AI faction's seeds
+    let STEP_RATE = 9;              // RD steps/sec — pattern tempo & spread speed [knob]
+
+    const game = { running: false, winner: 0, nutrient: NUT_MAX, tStart: 0, aiNext: [] };
+    const aiSeeds = [];
+    let lastFrame = performance.now(), stepAcc = 0;
+
+    const $banner = document.getElementById('banner');
+    const $bannerTitle = document.getElementById('banner-title');
+    const $nut = document.getElementById('nut');
+    const $nutfill = document.getElementById('nutfill');
+    const $time = document.getElementById('time');
+
+    function seedDiskCPU(cx, cy, r, owner) {
+      const arr = bufA.array;
+      for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+        if (dx * dx + dy * dy > r * r) continue;
+        const x = (cx + dx + N) % N, y = (cy + dy + N) % N, i = (y * N + x) * 4;
+        arr[i] = 1; arr[i + 1] = 1; arr[i + 2] = owner;
+      }
+    }
+    function newRound() {
+      const arr = bufA.array;
+      for (let i = 0; i < CELLS; i++) { arr[i*4]=1; arr[i*4+1]=0; arr[i*4+2]=0; arr[i*4+3]=0; }
+      seedDiskCPU((N * 0.20) | 0, (N * 0.80) | 0, 14, PLAYER);
+      seedDiskCPU((N * 0.80) | 0, (N * 0.76) | 0, 14, AIS[0]);
+      seedDiskCPU((N * 0.52) | 0, (N * 0.20) | 0, 14, AIS[1]);
+      bufA.needsUpdate = true;
+      territory.fill(0); territory[0] = CELLS;   // assume all-neutral until first readback
+      scoreGen++;                                // invalidate any in-flight readback
+      game.running = true; game.winner = 0; game.nutrient = NUT_MAX;
+      game.tStart = performance.now();
+      game.aiNext = AIS.map((_, k) => AI_INTERVAL * (0.6 + 0.5 * k));
+      $banner.classList.remove('show');
+    }
+
+    function aiTick(nowSec) {
+      AIS.forEach((fac, k) => {
+        if (nowSec >= game.aiNext[k]) {
+          game.aiNext[k] = nowSec + AI_INTERVAL;
+          aiSeeds.push({ cx: (Math.random() * N) | 0, cy: (Math.random() * N) | 0, r: 12, owner: fac });
+        }
+      });
+    }
+
+    function endRound(winner) {
+      game.running = false; game.winner = winner;
+      $bannerTitle.textContent = winner === PLAYER ? 'You win' : FACTIONS[winner].name + ' wins';
+      $bannerTitle.style.color = cssColor(FACTIONS[winner].color);
+      $banner.classList.add('show');
+    }
+    function bestFaction() {
+      let bf = 0, bv = -1;
+      for (let f = 1; f < K; f++) if (territory[f] > bv) { bv = territory[f]; bf = f; }
+      return bf;
+    }
+    function checkWin(nowSec) {
+      if (!game.running || nowSec < 2.0) return;   // grace period (let scores settle)
+      for (let f = 1; f < K; f++) if (100 * territory[f] / CELLS >= WIN_PCT) return endRound(f);
+      if (territory[0] / CELLS < FULL_NEUTRAL) return endRound(bestFaction()); // field claimed
+      if (nowSec >= ROUND_SECS) return endRound(bestFaction());
+    }
+    function updateGameHUD(nowSec) {
+      $nut.textContent = Math.round(game.nutrient);
+      $nutfill.style.width = (100 * game.nutrient / NUT_MAX) + '%';
+      $time.textContent = game.running ? Math.max(0, ROUND_SECS - nowSec).toFixed(0) + 's' : '—';
+    }
+
+    window.addEventListener('keydown', (e) => { if (e.key === 'r' || e.key === 'R') newRound(); });
 
     // ---------------------------------------------------------------------------
     // Loop
     // ---------------------------------------------------------------------------
     function animate() {
-      if (uBrushActive.value > 0.5 || pendingSeed) { // inject brush into bufA
-        renderer.compute(seedA);
-        pendingSeed = false;
+      const now = performance.now();
+      const dt = Math.min(0.05, (now - lastFrame) / 1000); lastFrame = now;
+      const nowSec = (now - game.tStart) / 1000;
+
+      if (game.running) {
+        // nutrient regen ∝ territory
+        const frac = (territory[PLAYER] || 0) / CELLS;
+        game.nutrient = Math.min(NUT_MAX, game.nutrient + (NUT_BASE + NUT_PER_TERR * frac) * dt);
+
+        // AI seeding (save/restore the player's brush around AI stamps)
+        aiTick(nowSec);
+        if (aiSeeds.length) {
+          const pb = uBrush.value.clone();
+          for (const s of aiSeeds) { uBrush.value.set(s.cx, s.cy, s.r, s.owner); renderer.compute(seedA); }
+          aiSeeds.length = 0;
+          uBrush.value.copy(pb);
+        }
+
+        // player seeding — gated by nutrient (cost ∝ brush area)
+        const wantSeed = (uBrushActive.value > 0.5 || pendingSeed) && Math.round(uBrush.value.w) === PLAYER;
+        const cost = SEED_COST * (uBrush.value.z * uBrush.value.z) / (12 * 12) * dt;
+        if (wantSeed && game.nutrient >= cost) { renderer.compute(seedA); game.nutrient -= cost; }
       }
-      for (let s = 0; s < ITER; s++) {
-        renderer.compute((s & 1) === 0 ? stepAB : stepBA);
-      }
+      pendingSeed = false;
+
+      // RD steps — time-throttled, EVEN count per frame so it ends in bufA
+      stepAcc += STEP_RATE * dt;
+      let nSteps = Math.floor(stepAcc); nSteps -= nSteps % 2; if (nSteps > 16) nSteps = 16;
+      stepAcc -= nSteps;
+      for (let s = 0; s < nSteps; s++) renderer.compute((s & 1) === 0 ? stepAB : stepBA);
+
       renderer.render(scene, camera);
-      maybeScore(performance.now());   // throttled GPU territory reduction + readback
+      maybeScore(now);
+      checkWin(nowSec);
+      updateGameHUD(nowSec);
     }
+    lastFrame = performance.now();
+    newRound();
     renderer.setAnimationLoop(animate);
 
     // Expose for dev probing (removed before ship).
     window.__bloom = {
       THREE, renderer, scene, camera, material, bufA, bufB, N, FACTIONS, CELLS,
       uDt, uBrush, uBrushActive, uFeed, uKill, uColor,
-      scoreBuf, scoreFromA, territory, TILES, K,
-      setIter: (n) => { ITER = (n % 2 === 0) ? n : n + 1; return ITER; },
+      scoreBuf, scoreFromA, territory, TILES, K, game,
+      newRound, setRate: (n) => { STEP_RATE = n; return STEP_RATE; },
       faction: (idx) => selectFaction(idx),
       // dev: stamp at a normalised position (0..1) as `owner`, holding for `ms`
       stamp: (u, v, owner = 1, radius = 12, ms = 300) => {
@@ -539,7 +679,7 @@
         setTimeout(() => { uBrushActive.value = 0; }, ms);
       },
     };
-    console.log('[bloom] M5 scoring ready — backend:', renderer.backend.isWebGPUBackend ? 'WebGPU' : 'other', 'grid', N, 'ITER', ITER, 'tiles', TILES);
+    console.log('[bloom] M6 game ready — backend:', renderer.backend.isWebGPUBackend ? 'WebGPU' : 'other', 'grid', N, 'rate', STEP_RATE, 'tiles', TILES);
   </script>
 </body>
 </html>
