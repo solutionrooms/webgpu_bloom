@@ -76,7 +76,7 @@
 
   <script type="module">
     import * as THREE from 'three';
-    import { uv, vec3, vec4, mix } from 'three/tsl';
+    import { Fn, uv, vec3, vec4, float, int, uniform, storage, mix, smoothstep } from 'three/tsl';
 
     const $ = (id) => document.getElementById(id);
 
@@ -121,12 +121,73 @@
     const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     const scene = new THREE.Scene();
 
-    const material = new THREE.MeshBasicNodeMaterial();
-    // M0 placeholder: a calm substrate gradient so we can confirm the plane fills
-    // the viewport and uv orientation is correct. Replaced by the field read in M1.
+    // ---------------------------------------------------------------------------
+    // CONFIG
+    // ---------------------------------------------------------------------------
+    const N = 512;                 // grid is N×N cells (knob; spec default 1024)
+    const CELLS = N * N;
+    $('grid').textContent = `${N}×${N}`;
+
+    // ---------------------------------------------------------------------------
+    // Field storage buffers (ping-pong). One vec4 per cell:
+    //   .x = A (chemical A, starts 1)   .y = B (chemical B, starts 0)
+    //   .z = owner (faction id, 0=neutral)   .w = aux (reserved)
+    // ---------------------------------------------------------------------------
+    const bufA = new THREE.StorageBufferAttribute(CELLS, 4);
+    const bufB = new THREE.StorageBufferAttribute(CELLS, 4);
+
+    // Initialise bufA: A=1, B=0, owner=0, plus a handful of random B=1 seed disks.
+    // (M2 will grow these; for M1 we just display the static seeded field.)
+    function seedField(arr) {
+      for (let i = 0; i < CELLS; i++) {
+        arr[i * 4 + 0] = 1.0; // A
+        arr[i * 4 + 1] = 0.0; // B
+        arr[i * 4 + 2] = 0.0; // owner
+        arr[i * 4 + 3] = 0.0; // aux
+      }
+      const SEEDS = 28, R = 5;
+      for (let s = 0; s < SEEDS; s++) {
+        const cx = (Math.random() * N) | 0;
+        const cy = (Math.random() * N) | 0;
+        for (let dy = -R; dy <= R; dy++) {
+          for (let dx = -R; dx <= R; dx++) {
+            if (dx * dx + dy * dy > R * R) continue;
+            const x = (cx + dx + N) % N;
+            const y = (cy + dy + N) % N;
+            const i = y * N + x;
+            arr[i * 4 + 1] = 1.0; // B = 1 (living)
+          }
+        }
+      }
+    }
+    seedField(bufA.array);
+    bufA.needsUpdate = true;
+
+    // TSL storage views over the buffers.
+    const fA = storage(bufA, 'vec4', CELLS);
+    const fB = storage(bufB, 'vec4', CELLS);
+
+    // ---------------------------------------------------------------------------
+    // Uniforms
+    // ---------------------------------------------------------------------------
+    const uN = uniform(float(N));
+
+    // ---------------------------------------------------------------------------
+    // Display — full-screen quad whose colour reads the field storage buffer.
+    // THIS IS THE M1 RISK GATE: reading fA.element(i) in a fragment node.
+    // ---------------------------------------------------------------------------
     const substrate = vec3(0.02, 0.05, 0.09);
-    const glow = vec3(0.05, 0.12, 0.22);
-    material.colorNode = vec4(mix(substrate, glow, uv().y), 1.0);
+    const livingTint = vec3(0.20, 1.00, 0.55);
+
+    const material = new THREE.MeshBasicNodeMaterial();
+    material.colorNode = Fn(() => {
+      const cell = uv().mul(uN).floor();           // vec2 cell coords (0..N-1)
+      const i = int(cell.y.mul(uN).add(cell.x));    // linear index
+      const c = fA.element(i);                       // vec4 (A,B,owner,aux)
+      const b = c.y;
+      const col = mix(substrate, livingTint, smoothstep(0.10, 0.50, b));
+      return vec4(col, 1.0);
+    })();
 
     const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
     scene.add(quad);
@@ -149,8 +210,8 @@
     renderer.setAnimationLoop(animate);
 
     // Expose for dev probing (removed before ship).
-    window.__bloom = { THREE, renderer, scene, camera, material };
-    console.log('[bloom] M0 boot OK — backend:', renderer.backend.isWebGPUBackend ? 'WebGPU' : 'other');
+    window.__bloom = { THREE, renderer, scene, camera, material, bufA, bufB, N };
+    console.log('[bloom] M1 field display OK — backend:', renderer.backend.isWebGPUBackend ? 'WebGPU' : 'other', 'grid', N);
   </script>
 </body>
 </html>
