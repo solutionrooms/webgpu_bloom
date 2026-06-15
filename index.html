@@ -52,6 +52,19 @@
     #score .lbl { position: absolute; left: 7px; line-height: 18px; font-size: 11px; color: #fff; }
     #score .pct { position: absolute; right: 7px; line-height: 18px; font-size: 11px; color: #fff; font-weight: 600; }
 
+    #hint { position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+      padding: 7px 14px; background: rgba(8,12,20,.6); border: 1px solid rgba(120,160,220,.18);
+      border-radius: 999px; backdrop-filter: blur(6px); white-space: nowrap;
+      transition: opacity .8s ease; }
+    #hint.hide { opacity: 0; }
+
+    #loading { position: fixed; inset: 0; display: grid; place-items: center; z-index: 20;
+      background: radial-gradient(120% 120% at 50% 30%, #0b1426, #05070a);
+      font: 600 40px/1.2 system-ui, sans-serif; color: #cfe3ff; letter-spacing: .04em; }
+    #loading small { display: block; margin-top: 10px; font: 400 14px/1 ui-monospace, monospace;
+      opacity: .6; letter-spacing: 0; }
+    #loading.hide { display: none; }
+
     #toolbar { left: 50%; transform: translateX(-50%); bottom: 16px;
       display: flex; gap: 8px; align-items: center; }
     #factions { left: 50%; transform: translateX(-50%); bottom: 64px;
@@ -93,7 +106,10 @@
 <body>
   <div id="app"></div>
 
+  <div id="loading"><div>Bloom<small>loading WebGPU libraries…</small></div></div>
+
   <div id="hud">
+    <div id="hint">Left-drag to grow your <b style="color:#5dffa6">Coral</b>. Claim the most territory before the timer ends. <b>R</b> restarts.</div>
     <div id="stats" class="panel">
       <div class="row"><span>Time</span><b id="time">—</b></div>
       <div class="row"><span>Nutrient</span><b id="nut">—</b></div>
@@ -168,6 +184,7 @@
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(window.innerWidth, window.innerHeight);
     $('app').appendChild(renderer.domElement);
+    try { renderer.backend.trackTimestamp = true; } catch (e) {} // for GPU-ms readout
 
     $('backend').textContent = 'WebGPU';
     $('backend').className = 'ok';
@@ -183,8 +200,13 @@
     // ---------------------------------------------------------------------------
     // CONFIG
     // ---------------------------------------------------------------------------
-    const N = 512;                 // grid is N×N cells (knob; spec default 1024)
+    // Grid size is a knob via ?n=  (256/512/1024/2048); default 512.
+    const N = (() => {
+      const n = parseInt(new URLSearchParams(location.search).get('n'), 10);
+      return [256, 512, 1024, 2048].includes(n) ? n : 512;
+    })();
     const CELLS = N * N;
+    const BR = [Math.round(N / 85), Math.round(N / 42), Math.round(N / 21)]; // S/M/L radii (cells)
     $('grid').textContent = `${N}×${N}`;
 
     // ---------------------------------------------------------------------------
@@ -230,6 +252,7 @@
     // Uniforms
     // ---------------------------------------------------------------------------
     const uN = uniform(float(N));
+    const uScale = uniform(new THREE.Vector2(1, 1)); // aspect correction (set on resize)
     // Gray-Scott / diffusion constants (Karl Sims tutorial values — known-good).
     const uDa = uniform(float(1.0));    // diffusion of A
     const uDb = uniform(float(0.5));    // diffusion of B
@@ -264,20 +287,29 @@
     // THIS IS THE M1 RISK GATE: reading fA.element(i) in a fragment node.
     // ---------------------------------------------------------------------------
     const substrate = vec3(0.02, 0.05, 0.09);
+    const letterbox = vec3(0.012, 0.016, 0.024);
 
     const material = new THREE.MeshBasicNodeMaterial();
     material.colorNode = Fn(() => {
-      const cell = uv().mul(uN).floor();           // vec2 cell coords (0..N-1)
-      const i = int(cell.y.mul(uN).add(cell.x));    // linear index
-      const c = fA.element(i);                       // vec4 (A,B,owner,aux)
+      // Aspect-correct: map screen uv to a centred square so cells stay square
+      // on any viewport; outside the field square shows the letterbox colour.
+      const p = uv().sub(0.5).mul(uScale);
+      const inside = step(p.x.abs(), 0.5).mul(step(p.y.abs(), 0.5));
+      const fuv = p.add(0.5).clamp(0.0, 0.99999);
+      const cell = fuv.mul(uN).floor();
+      const i = int(cell.y.mul(uN).add(cell.x));
+      const c = fA.element(i);                        // vec4 (A,B,owner,aux)
       let tint = uColor[0];
       for (let k = 1; k < FACTIONS.length; k++) {
         tint = mix(tint, uColor[k], step(float(k - 0.5), c.z)); // owner >= k
       }
       const owned = step(0.5, c.z);                            // 1 if any faction owns it
       const terr = mix(substrate, tint.mul(0.16), owned);      // faint territory fill
-      const col = mix(terr, tint, smoothstep(0.10, 0.50, c.y)); // bright living worms
-      return vec4(col, 1.0);
+      let col = mix(terr, tint, smoothstep(0.10, 0.50, c.y));  // bright living worms
+      // contested-front shimmer: aux holds a recently-flipped fade timer
+      const shimmer = smoothstep(0.05, 1.0, c.w).mul(0.6);
+      col = mix(col, vec3(1.0, 1.0, 1.0), shimmer.mul(c.y.add(0.15)));
+      return vec4(mix(letterbox, col, inside), 1.0);
     })();
 
     const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
@@ -356,7 +388,10 @@
         const A2 = A.add(innerA.mul(uDt)).clamp(0.0, 1.0);
         const B2 = B.add(innerB.mul(uDt)).clamp(0.0, 1.0);
 
-        out.element(i).assign(vec4(A2, B2, owner, c.w));
+        // aux = contested-front fade timer: 1 on an owner flip, else decays
+        const flipped = step(0.5, owner.sub(c.z).abs());
+        const aux = flipped.max(c.w.mul(0.92));
+        out.element(i).assign(vec4(A2, B2, owner, aux));
       });
       return kernel().compute(CELLS);
     }
@@ -428,9 +463,12 @@
     // Resize
     // ---------------------------------------------------------------------------
     function onResize() {
-      renderer.setSize(window.innerWidth, window.innerHeight);
-      // Orthographic bounds stay -1..1; the plane always fills the frustum.
+      const w = window.innerWidth, h = window.innerHeight;
+      renderer.setSize(w, h);
+      // aspect correction: the field stays a centred square with square cells
+      if (w >= h) uScale.value.set(w / h, 1); else uScale.value.set(1, h / w);
     }
+    onResize();
     window.addEventListener('resize', onResize);
 
     // ---------------------------------------------------------------------------
@@ -441,10 +479,11 @@
     let pendingSeed = false;   // guarantees ≥1 stamp even on a one-frame click
     function setBrushFromEvent(e) {
       const rect = canvas.getBoundingClientRect();
-      const u = (e.clientX - rect.left) / rect.width;
-      const v = 1 - (e.clientY - rect.top) / rect.height;
-      uBrush.value.x = Math.max(0, Math.min(N - 1, Math.floor(u * N)));
-      uBrush.value.y = Math.max(0, Math.min(N - 1, Math.floor(v * N)));
+      const px = ((e.clientX - rect.left) / rect.width - 0.5) * uScale.value.x;
+      const py = (1 - (e.clientY - rect.top) / rect.height - 0.5) * uScale.value.y;
+      if (Math.abs(px) > 0.5 || Math.abs(py) > 0.5) return; // outside the field square
+      uBrush.value.x = Math.max(0, Math.min(N - 1, Math.floor((px + 0.5) * N)));
+      uBrush.value.y = Math.max(0, Math.min(N - 1, Math.floor((py + 0.5) * N)));
     }
     canvas.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
@@ -461,14 +500,15 @@
     canvas.addEventListener('pointercancel', endStroke);
     window.addEventListener('blur', endStroke);
 
-    // Brush-size buttons
+    // Brush-size buttons (radii scale with grid size)
+    const brushBtns = [...document.querySelectorAll('#toolbar button[data-brush]')];
+    brushBtns.forEach((btn, i) => { btn.dataset.brush = BR[i]; });
     function selectBrush(btn) {
       uBrush.value.z = parseFloat(btn.dataset.brush);
-      document.querySelectorAll('#toolbar button[data-brush]')
-        .forEach(b => b.classList.toggle('sel', b === btn));
+      brushBtns.forEach(b => b.classList.toggle('sel', b === btn));
     }
-    document.querySelectorAll('#toolbar button[data-brush]')
-      .forEach(btn => btn.addEventListener('click', () => selectBrush(btn)));
+    brushBtns.forEach(btn => btn.addEventListener('click', () => selectBrush(btn)));
+    uBrush.value.z = BR[1];  // default M
 
     // Faction buttons — pick which recipe the brush seeds
     function selectFaction(idx) {
@@ -535,6 +575,21 @@
         if (Math.abs(sum - CELLS) > 1) return;
         updateScoreUI(totals);
       }).catch(() => { scorePending = false; });
+    }
+
+    // GPU-ms readout (timestamp API; guarded — ignore absurd values from a
+    // throttled/backgrounded tab). Report GPU ms, not FPS (which is vsync-capped).
+    let lastGpu = 0, gpuPending = false;
+    function maybeGpuMs(nowMs) {
+      if (gpuPending || nowMs - lastGpu < 500) return;
+      lastGpu = nowMs; gpuPending = true;
+      Promise.resolve()
+        .then(() => renderer.resolveTimestampsAsync(THREE.TimestampQuery.COMPUTE))
+        .then((ms) => {
+          gpuPending = false;
+          if (typeof ms === 'number' && ms > 0 && ms < 2000) $('gpums').textContent = ms.toFixed(2) + ' ms';
+        })
+        .catch(() => { gpuPending = false; });
     }
 
     // ---------------------------------------------------------------------------
@@ -641,7 +696,7 @@
 
         // player seeding — gated by nutrient (cost ∝ brush area)
         const wantSeed = (uBrushActive.value > 0.5 || pendingSeed) && Math.round(uBrush.value.w) === PLAYER;
-        const cost = SEED_COST * (uBrush.value.z * uBrush.value.z) / (12 * 12) * dt;
+        const cost = SEED_COST * (uBrush.value.z * uBrush.value.z) / (BR[1] * BR[1]) * dt;
         if (wantSeed && game.nutrient >= cost) { renderer.compute(seedA); game.nutrient -= cost; }
       }
       pendingSeed = false;
@@ -654,12 +709,15 @@
 
       renderer.render(scene, camera);
       maybeScore(now);
+      maybeGpuMs(now);
       checkWin(nowSec);
       updateGameHUD(nowSec);
     }
     lastFrame = performance.now();
     newRound();
     renderer.setAnimationLoop(animate);
+    document.getElementById('loading').classList.add('hide');
+    setTimeout(() => document.getElementById('hint').classList.add('hide'), 9000);
 
     // Expose for dev probing (removed before ship).
     window.__bloom = {
@@ -679,7 +737,7 @@
         setTimeout(() => { uBrushActive.value = 0; }, ms);
       },
     };
-    console.log('[bloom] M6 game ready — backend:', renderer.backend.isWebGPUBackend ? 'WebGPU' : 'other', 'grid', N, 'rate', STEP_RATE, 'tiles', TILES);
+    console.log('[bloom] M7 ready — backend:', renderer.backend.isWebGPUBackend ? 'WebGPU' : 'other', 'grid', N, 'rate', STEP_RATE, 'tiles', TILES);
   </script>
 </body>
 </html>
