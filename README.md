@@ -19,6 +19,17 @@ That keeps the whole loop on the GPU and sidesteps the one thing the GPU is bad 
 - **three.js r0.184.0**, `WebGPURenderer` + **TSL** (Three Shading Language), loaded via an ES-module import map from a CDN. **No bundler, no build.** Serve the folder statically.
 - WebGPU backend (compute shaders, storage buffers). Optional WebGL2 fallback for *display only* — the compute sim is WebGPU-only.
 
+## Play
+
+You are **Coral** (green). Two AI factions — **Bloom** (magenta) and **Spore** (amber) — contest the same field.
+
+- **Left-drag** on the field to seed your living pattern; it spreads and claims territory. Seeding costs **nutrient** (regenerates faster the more territory you hold).
+- **Brush S / M / L** — bigger brush, bigger stamp, more nutrient.
+- **Win** by holding the most territory when the timer ends (or ≥55% at any point).
+- **R** — restart the round.
+
+Tip: seed into open neutral ground ahead of the fronts — that's how you out-claim the AI.
+
 ## Run
 
 ```bash
@@ -26,6 +37,8 @@ That keeps the whole loop on the GPU and sidesteps the one thing the GPU is bad 
 python3 -m http.server 8080
 # open http://localhost:8080/  in Chrome/Edge (WebGPU on by default) or Firefox/Safari 18+
 ```
+
+Grid size is a URL knob: `?n=256` / `512` (default) / `1024` / `2048`.
 
 ## Deploy
 
@@ -44,7 +57,9 @@ CLAUDE.md             critical rules / gotchas for the building agent (read firs
 
 ## Status
 
-Spec only. Build per `PROCESS.md`, verifying each milestone in the browser before moving on.
+**Playable.** Built and verified milestone-by-milestone in Chrome (M0–M7 in `PROCESS.md`): WebGPU boot → field buffer + fragment-stage storage read → Gray-Scott reaction-diffusion compute → brush seeding → factions + ownership/combat → GPU territory reduction → nutrient economy + AI + win/restart → aspect-correct display, GPU-ms telemetry, grid knob, contested-front shimmer. The entire world is simulated and scored on the GPU; the CPU only injects brush strokes and reads a tiny score buffer a few times a second.
+
+Recipes are the meta — tune the per-faction feed/kill in `FACTIONS` (and the `[knob]` constants) in `index.html`.
 
 ## Provenance
 
