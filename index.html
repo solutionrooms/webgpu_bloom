@@ -29,6 +29,13 @@
     #stats .ok { color: #7CFFB2; }
     #stats .bad { color: #ff8080; }
 
+    #score { top: 92px; left: 12px; width: 184px; display: flex; flex-direction: column; gap: 6px; }
+    #score .bar { position: relative; height: 18px; border-radius: 5px; overflow: hidden;
+      background: rgba(255,255,255,.06); }
+    #score .fill { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: 5px; transition: width .25s ease; }
+    #score .lbl { position: absolute; left: 7px; line-height: 18px; font-size: 11px; color: #fff; }
+    #score .pct { position: absolute; right: 7px; line-height: 18px; font-size: 11px; color: #fff; font-weight: 600; }
+
     #toolbar { left: 50%; transform: translateX(-50%); bottom: 16px;
       display: flex; gap: 8px; align-items: center; }
     #factions { left: 50%; transform: translateX(-50%); bottom: 64px;
@@ -77,6 +84,8 @@
       <div class="row"><span>GPU</span><b id="gpums">—</b></div>
     </div>
 
+    <div id="score" class="panel"></div>
+
     <div id="factions" class="panel"><span class="lbl">Seed</span></div>
 
     <div id="toolbar" class="panel">
@@ -100,7 +109,7 @@
 
   <script type="module">
     import * as THREE from 'three';
-    import { Fn, uv, vec3, vec4, float, int, uniform, storage, mix, smoothstep, step, instanceIndex, min } from 'three/tsl';
+    import { Fn, uv, vec3, vec4, float, int, uniform, storage, mix, smoothstep, step, instanceIndex, Loop, min } from 'three/tsl';
 
     const $ = (id) => document.getElementById(id);
 
@@ -360,6 +369,36 @@
     let ITER = 8;                       // RD steps per frame — MUST be even (ends in bufA)
 
     // ---------------------------------------------------------------------------
+    // Scoring — tiled GPU reduction (no atomics). TILES threads each scan a
+    // contiguous slice of SPAN cells and write per-faction counts to their OWN
+    // output slots (no races). CPU sums tiles → territory %. (Hardcoded to 4
+    // owner slots = neutral + 3 factions.)
+    // ---------------------------------------------------------------------------
+    const SPAN = 256;
+    const TILES = Math.ceil(CELLS / SPAN);   // 262144/256 = 1024
+    const K = FACTIONS.length;               // 4
+    const scoreBuf = new THREE.StorageBufferAttribute(TILES * K, 1);
+    const scoreS = storage(scoreBuf, 'float', TILES * K);
+
+    const scoreFromA = Fn(() => {
+      const t = int(instanceIndex);
+      const base = t.mul(SPAN);
+      const c0 = float(0).toVar(), c1 = float(0).toVar();
+      const c2 = float(0).toVar(), c3 = float(0).toVar();
+      Loop(SPAN, ({ i }) => {
+        const o = fA.element(base.add(i)).z;
+        c0.addAssign(step(0.5, o).oneMinus());      // owner == 0 (neutral)
+        c1.addAssign(step(0.5, o).sub(step(1.5, o))); // owner == 1
+        c2.addAssign(step(1.5, o).sub(step(2.5, o))); // owner == 2
+        c3.addAssign(step(2.5, o));                  // owner == 3
+      });
+      scoreS.element(t.mul(K).add(0)).assign(c0);
+      scoreS.element(t.mul(K).add(1)).assign(c1);
+      scoreS.element(t.mul(K).add(2)).assign(c2);
+      scoreS.element(t.mul(K).add(3)).assign(c3);
+    })().compute(TILES);
+
+    // ---------------------------------------------------------------------------
     // Resize
     // ---------------------------------------------------------------------------
     function onResize() {
@@ -427,6 +466,46 @@
     });
 
     // ---------------------------------------------------------------------------
+    // Territory bars (built from FACTIONS) + throttled GPU score readback (~3/s)
+    // ---------------------------------------------------------------------------
+    const cssColor = (lin) => `rgb(${lin.map(v => Math.round(Math.min(1, Math.sqrt(v)) * 255)).join(',')})`;
+    const scorePanel = document.getElementById('score');
+    const scoreBars = [];
+    FACTIONS.forEach((f, idx) => {
+      if (idx === 0) return;
+      const bar = document.createElement('div'); bar.className = 'bar';
+      const fill = document.createElement('div'); fill.className = 'fill'; fill.style.background = cssColor(f.color);
+      const lbl = document.createElement('span'); lbl.className = 'lbl'; lbl.textContent = f.name;
+      const pct = document.createElement('span'); pct.className = 'pct'; pct.textContent = '0%';
+      bar.append(fill, lbl, pct); scorePanel.append(bar);
+      scoreBars[idx] = { fill, pct };
+    });
+
+    const territory = new Array(K).fill(0); // latest per-faction cell counts (index 0 = neutral)
+    function updateScoreUI(totals) {
+      for (let k = 0; k < K; k++) territory[k] = totals[k];
+      for (let k = 1; k < K; k++) {
+        const pct = 100 * totals[k] / CELLS;
+        scoreBars[k].fill.style.width = pct.toFixed(1) + '%';
+        scoreBars[k].pct.textContent = Math.round(pct) + '%';
+      }
+    }
+
+    let lastScore = 0, scorePending = false;
+    function maybeScore(nowMs) {
+      if (scorePending || nowMs - lastScore < 330) return;
+      lastScore = nowMs; scorePending = true;
+      renderer.compute(scoreFromA);
+      renderer.getArrayBufferAsync(scoreBuf).then((ab) => {
+        const arr = new Float32Array(ab);
+        const totals = new Array(K).fill(0);
+        for (let t = 0; t < TILES; t++) for (let k = 0; k < K; k++) totals[k] += arr[t * K + k];
+        updateScoreUI(totals);
+        scorePending = false;
+      }).catch(() => { scorePending = false; });
+    }
+
+    // ---------------------------------------------------------------------------
     // Loop
     // ---------------------------------------------------------------------------
     function animate() {
@@ -438,13 +517,15 @@
         renderer.compute((s & 1) === 0 ? stepAB : stepBA);
       }
       renderer.render(scene, camera);
+      maybeScore(performance.now());   // throttled GPU territory reduction + readback
     }
     renderer.setAnimationLoop(animate);
 
     // Expose for dev probing (removed before ship).
     window.__bloom = {
-      THREE, renderer, scene, camera, material, bufA, bufB, N, FACTIONS,
+      THREE, renderer, scene, camera, material, bufA, bufB, N, FACTIONS, CELLS,
       uDt, uBrush, uBrushActive, uFeed, uKill, uColor,
+      scoreBuf, scoreFromA, territory, TILES, K,
       setIter: (n) => { ITER = (n % 2 === 0) ? n : n + 1; return ITER; },
       faction: (idx) => selectFaction(idx),
       // dev: stamp at a normalised position (0..1) as `owner`, holding for `ms`
@@ -458,7 +539,7 @@
         setTimeout(() => { uBrushActive.value = 0; }, ms);
       },
     };
-    console.log('[bloom] M4 factions + combat ready — backend:', renderer.backend.isWebGPUBackend ? 'WebGPU' : 'other', 'grid', N, 'ITER', ITER, 'factions', FACTIONS.length - 1);
+    console.log('[bloom] M5 scoring ready — backend:', renderer.backend.isWebGPUBackend ? 'WebGPU' : 'other', 'grid', N, 'ITER', ITER, 'tiles', TILES);
   </script>
 </body>
 </html>
