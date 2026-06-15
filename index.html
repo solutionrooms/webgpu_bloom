@@ -31,7 +31,10 @@
 
     #toolbar { left: 50%; transform: translateX(-50%); bottom: 16px;
       display: flex; gap: 8px; align-items: center; }
-    #toolbar .lbl { opacity: .7; margin-right: 2px; }
+    #factions { left: 50%; transform: translateX(-50%); bottom: 64px;
+      display: flex; gap: 8px; align-items: center; }
+    #toolbar .lbl, #factions .lbl { opacity: .7; margin-right: 2px; }
+    #factions button.sel { color: #fff; }
     #hud button {
       pointer-events: auto; cursor: pointer; font: inherit;
       background: rgba(20,28,44,.85); color: #cfe3ff;
@@ -74,6 +77,8 @@
       <div class="row"><span>GPU</span><b id="gpums">—</b></div>
     </div>
 
+    <div id="factions" class="panel"><span class="lbl">Seed</span></div>
+
     <div id="toolbar" class="panel">
       <span class="lbl">Brush</span>
       <button data-brush="6">S</button>
@@ -95,7 +100,7 @@
 
   <script type="module">
     import * as THREE from 'three';
-    import { Fn, uv, vec3, vec4, float, int, uniform, storage, mix, smoothstep, instanceIndex, If, min } from 'three/tsl';
+    import { Fn, uv, vec3, vec4, float, int, uniform, storage, mix, smoothstep, step, instanceIndex, min } from 'three/tsl';
 
     const $ = (id) => document.getElementById(id);
 
@@ -194,31 +199,49 @@
     const uDa = uniform(float(1.0));    // diffusion of A
     const uDb = uniform(float(0.5));    // diffusion of B
     const uDt = uniform(float(1.0));    // timestep (≤ 1.0)
-    // "coral" recipe — branching maze-fronts. Grows reliably from a single
-    // brush seed (mitosis F=0.0367 dies as an isolated seed — its die-off
-    // transient needs clustered seeds to survive; coral grows monotonically).
-    const uFeed = uniform(float(0.0545));
-    const uKill = uniform(float(0.0620));
+    // ---------------------------------------------------------------------------
+    // Factions. Index 0 = neutral substrate. Each is a Gray-Scott recipe
+    // (feed/kill) + a colour. Only recipes that grow reliably from a lone seed
+    // are used (screened on hardware; mitosis/spots die as isolated seeds).
+    // Colours are linear RGB (renderer encodes sRGB on output).
+    // ---------------------------------------------------------------------------
+    const FACTIONS = [
+      { name: 'Neutral', feed: 0.0000, kill: 0.0620, color: [0.02, 0.05, 0.09] },
+      { name: 'Coral',   feed: 0.0545, kill: 0.0620, color: [0.12, 1.00, 0.50] }, // green — balanced (player)
+      { name: 'Bloom',   feed: 0.0620, kill: 0.0609, color: [1.00, 0.16, 0.52] }, // magenta — territorial (~even vs Coral)
+      { name: 'Spore',   feed: 0.0390, kill: 0.0580, color: [1.00, 0.62, 0.14] }, // amber — aggressive (beats Coral)
+    ];
+    // Per-faction uniforms, selected in-shader by owner via a small branch chain
+    // (uniformArray of scalars has std140 stride quirks — this is unambiguous).
+    const uFeed  = FACTIONS.map(f => uniform(float(f.feed)));
+    const uKill  = FACTIONS.map(f => uniform(float(f.kill)));
+    const uColor = FACTIONS.map(f => uniform(new THREE.Vector3(...f.color)));
 
     // Brush: (cellX, cellY, radius, owner) + an active flag. All seeding is
     // uniform-driven — the CPU never writes the field buffer mid-ping-pong.
     const uBrush = uniform(new THREE.Vector4(0, 0, 12, 1));
     const uBrushActive = uniform(0);
+    let currentFaction = 1;          // which recipe the brush seeds
+    uBrush.value.w = currentFaction;
 
     // ---------------------------------------------------------------------------
     // Display — full-screen quad whose colour reads the field storage buffer.
     // THIS IS THE M1 RISK GATE: reading fA.element(i) in a fragment node.
     // ---------------------------------------------------------------------------
     const substrate = vec3(0.02, 0.05, 0.09);
-    const livingTint = vec3(0.20, 1.00, 0.55);
 
     const material = new THREE.MeshBasicNodeMaterial();
     material.colorNode = Fn(() => {
       const cell = uv().mul(uN).floor();           // vec2 cell coords (0..N-1)
       const i = int(cell.y.mul(uN).add(cell.x));    // linear index
       const c = fA.element(i);                       // vec4 (A,B,owner,aux)
-      const b = c.y;
-      const col = mix(substrate, livingTint, smoothstep(0.10, 0.50, b));
+      let tint = uColor[0];
+      for (let k = 1; k < FACTIONS.length; k++) {
+        tint = mix(tint, uColor[k], step(float(k - 0.5), c.z)); // owner >= k
+      }
+      const owned = step(0.5, c.z);                            // 1 if any faction owns it
+      const terr = mix(substrate, tint.mul(0.16), owned);      // faint territory fill
+      const col = mix(terr, tint, smoothstep(0.10, 0.50, c.y)); // bright living worms
       return vec4(col, 1.0);
     })();
 
@@ -258,14 +281,47 @@
           .add(l.y.add(r.y).add(u.y).add(d.y).mul(0.20))
           .add(ul.y.add(ur.y).add(dl.y).add(dr.y).mul(0.05));
 
+        // --- governing faction: strongest OWNED cell among centre + 4 ortho
+        // neighbours (mass wins → fronts push). The cell REACTS with this
+        // faction's recipe, so expansion into neutral substrate AND combat at a
+        // boundary both use the advancing faction's dynamics. (If we instead
+        // reacted by the stored owner, decay would flip transition cells to
+        // neutral whose feed=0 kills them irreversibly — total collapse.)
+        // Pure arithmetic (step/mix) — boolean select/AND/var-in-If proved
+        // unreliable in this TSL build.
+        const effB = (n) => step(0.5, n.z).mul(n.y.add(1.0)).sub(1.0); // owned ? B : -1
+        let bestB = effB(c);
+        let gov = c.z;                            // governing owner
+        const consider = (n) => {
+          const e = effB(n);
+          const win = step(bestB, e);             // 1 if e >= bestB
+          gov = mix(gov, n.z, win);
+          bestB = mix(bestB, e, win);
+        };
+        consider(l); consider(r); consider(u); consider(d);
+
+        // recipe of the governing faction (cascade by id)
+        let feed = uFeed[0];
+        let kill = uKill[0];
+        for (let k = 1; k < FACTIONS.length; k++) {
+          const ge = step(float(k - 0.5), gov);  // 1 when gov >= k
+          feed = mix(feed, uFeed[k], ge);
+          kill = mix(kill, uKill[k], ge);
+        }
+
         const A = c.x, B = c.y;
         const reaction = A.mul(B).mul(B);
-        const innerA = lapA.mul(uDa).sub(reaction).add(uFeed.mul(A.oneMinus()));
-        const innerB = lapB.mul(uDb).add(reaction).sub(uKill.add(uFeed).mul(B));
+        const innerA = lapA.mul(uDa).sub(reaction).add(feed.mul(A.oneMinus()));
+        const innerB = lapB.mul(uDb).add(reaction).sub(kill.add(feed).mul(B));
         const A2 = A.add(innerA.mul(uDt)).clamp(0.0, 1.0);
         const B2 = B.add(innerB.mul(uDt)).clamp(0.0, 1.0);
 
-        out.element(i).assign(vec4(A2, B2, c.z, c.w));
+        // Owner is STICKY: a claimed cell keeps its faction (and thus its
+        // recipe) even when B momentarily dips, so the pattern can recover
+        // instead of decaying into neutral (feed=0) and dying. Territory is
+        // lost only by combat — an enemy front with higher B overwrites it
+        // above. (gov already folds in that combat result.)
+        out.element(i).assign(vec4(A2, B2, gov, c.w));
       });
       return kernel().compute(CELLS);
     }
@@ -280,7 +336,7 @@
     // stamps within the brush when run.
     const seedA = Fn(() => {
       const i = int(instanceIndex);
-      const c = fA.element(i).toVar();
+      const c = fA.element(i);
       const x = float(i.mod(Ni));
       const y = float(i.div(Ni));
       // toroidal distance to the brush centre
@@ -290,14 +346,15 @@
       const dy = min(dy0, uN.sub(dy0));
       const d2 = dx.mul(dx).add(dy.mul(dy));
       const rad = uBrush.z;
-      // Stamp only fresh substrate (B low). This seeds a viable A=1,B=1 cell
-      // that then evolves naturally — re-stamping established pattern would
-      // deplete A and kill the bloom. Seeding existing pattern is a no-op
-      // (matches "seeding into enemy territory is wasteful").
-      If(d2.lessThan(rad.mul(rad)).and(c.y.lessThan(0.5)), () => {
-        c.assign(vec4(float(1.0), float(1.0), uBrush.w, c.w)); // A=1, B=1, owner
-      });
-      fA.element(i).assign(c);
+      // Stamp only fresh substrate (B low): seeds a viable A=1,B=1 cell that
+      // evolves naturally — re-stamping established pattern would deplete A and
+      // kill the bloom, so seeding into existing pattern is a no-op (matches
+      // "seeding into enemy territory is wasteful"). Pure arithmetic mask.
+      const inRad = step(rad.mul(rad), d2).oneMinus(); // 1 if d2 < rad²
+      const fresh = step(0.5, c.y).oneMinus();         // 1 if B < 0.5
+      const doStamp = inRad.mul(fresh);
+      const target = vec4(float(1.0), float(1.0), uBrush.w, c.w);
+      fA.element(i).assign(mix(c, target, doStamp));
     })().compute(CELLS);
 
     let ITER = 8;                       // RD steps per frame — MUST be even (ends in bufA)
@@ -348,6 +405,27 @@
     document.querySelectorAll('#toolbar button[data-brush]')
       .forEach(btn => btn.addEventListener('click', () => selectBrush(btn)));
 
+    // Faction buttons — pick which recipe the brush seeds
+    function selectFaction(idx) {
+      currentFaction = idx;
+      uBrush.value.w = idx;
+      document.querySelectorAll('#factions button')
+        .forEach(b => b.classList.toggle('sel', +b.dataset.faction === idx));
+    }
+    const facPanel = document.getElementById('factions');
+    FACTIONS.forEach((f, idx) => {
+      if (idx === 0) return; // skip neutral
+      const btn = document.createElement('button');
+      btn.textContent = f.name;
+      btn.dataset.faction = idx;
+      const css = f.color.map(v => Math.round(Math.min(1, Math.sqrt(v)) * 255)); // ~sRGB for swatch
+      btn.style.color = `rgb(${css[0]},${css[1]},${css[2]})`;
+      btn.style.borderColor = `rgba(${css[0]},${css[1]},${css[2]},.55)`;
+      if (idx === currentFaction) btn.classList.add('sel');
+      btn.addEventListener('click', () => selectFaction(idx));
+      facPanel.appendChild(btn);
+    });
+
     // ---------------------------------------------------------------------------
     // Loop
     // ---------------------------------------------------------------------------
@@ -365,20 +443,22 @@
 
     // Expose for dev probing (removed before ship).
     window.__bloom = {
-      THREE, renderer, scene, camera, material, bufA, bufB, N,
-      uFeed, uKill, uDt, uBrush, uBrushActive,
+      THREE, renderer, scene, camera, material, bufA, bufB, N, FACTIONS,
+      uDt, uBrush, uBrushActive, uFeed, uKill, uColor,
       setIter: (n) => { ITER = (n % 2 === 0) ? n : n + 1; return ITER; },
-      recipe: (f, k) => { uFeed.value = f; uKill.value = k; },
-      // dev: stamp at a normalised position (0..1) and hold for `ms`
-      stamp: (u, v, owner = 1, ms = 400) => {
+      faction: (idx) => selectFaction(idx),
+      // dev: stamp at a normalised position (0..1) as `owner`, holding for `ms`
+      stamp: (u, v, owner = 1, radius = 12, ms = 300) => {
         uBrush.value.x = Math.floor(u * N);
         uBrush.value.y = Math.floor(v * N);
+        uBrush.value.z = radius;
         uBrush.value.w = owner;
         uBrushActive.value = 1;
+        pendingSeed = true;
         setTimeout(() => { uBrushActive.value = 0; }, ms);
       },
     };
-    console.log('[bloom] M3 brush seeding ready — backend:', renderer.backend.isWebGPUBackend ? 'WebGPU' : 'other', 'grid', N, 'ITER', ITER);
+    console.log('[bloom] M4 factions + combat ready — backend:', renderer.backend.isWebGPUBackend ? 'WebGPU' : 'other', 'grid', N, 'ITER', ITER, 'factions', FACTIONS.length - 1);
   </script>
 </body>
 </html>
