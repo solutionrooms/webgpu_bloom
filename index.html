@@ -372,6 +372,16 @@
     const BR = [Math.round(N / 85), Math.round(N / 42), Math.round(N / 21)]; // S/M/L radii (cells)
     $('grid').textContent = `${N}×${N}`;
 
+    // --- Climate: warm equator (full growth), frozen poles (out of bounds). The
+    // row distance from the equator is "latitude". This also makes the eventual
+    // globe's poles natural ice caps, and keeps play in the well-behaved middle.
+    const TSCALE = 256;                       // fixed-point temperature 0..TSCALE
+    const WARM_ROW = Math.round(N * 0.25);    // within this of the equator → full growth
+    const CAP_ROW = Math.round(N * 0.42);     // beyond this → frozen ice (dead, unclaimable)
+    let FROZEN_CELLS = 0;
+    for (let y = 0; y < N; y++) if (Math.abs(y - N / 2) >= CAP_ROW) FROZEN_CELLS += N;
+    const LIVE_CELLS = CELLS - FROZEN_CELLS;  // denominator for territory % (ice excluded)
+
     // ---------------------------------------------------------------------------
     // Field storage buffers (ping-pong). One vec4 per cell:
     //   .x = A (chemical A, starts 1)   .y = B (chemical B, starts 0)
@@ -495,6 +505,14 @@
       const lit = col.mul(float(0.72).add(diff.mul(0.55))).add(vec3(1.0, 1.0, 1.0).mul(spec.mul(0.4)));
       col = mix(col, lit, uLight);
 
+      // --- climate look: frost toward the poles, solid ice in the frozen caps
+      // (the out-of-bounds zones). Warm equatorial band renders normally.
+      const latD = cy.sub(N / 2).abs();                              // |row − equator|
+      const frost = smoothstep(float(WARM_ROW), float(CAP_ROW), latD);
+      col = mix(col, vec3(0.60, 0.78, 0.98), frost.mul(frost).mul(0.92));
+      const cap = step(float(CAP_ROW), latD);                        // 1 in the frozen caps
+      col = mix(col, vec3(0.86, 0.94, 1.0), cap.mul(0.55));
+
       return vec4(mix(letterbox, col, inside), 1.0);
     })();
 
@@ -581,6 +599,14 @@
         const wasNeutral = step(c.z, 0.5);   // 1 if centre is neutral (c.z <= 0.5)
         owner = mix(owner, c.z, wasNeutral.mul(uClaim.oneMinus()));
 
+        // --- climate: temperature by latitude (rows from the equator). Warm
+        // equator → full growth; cooling toward the poles; frozen caps (T=0) are
+        // dead and unclaimable (out of bounds / ice). Integer → deterministic.
+        const lat = y.sub(int(N / 2)).max(int(N / 2).sub(y));   // |row − equator|
+        const Tfix = int(CAP_ROW).sub(lat).mul(int(TSCALE)).div(int(CAP_ROW - WARM_ROW)).max(int(0)).min(int(TSCALE));
+        const liveFlag = step(float(1), float(Tfix));            // 0 in frozen caps, else 1
+        owner = owner.mul(liveFlag);                             // ice can't be owned
+
         // recipe of the (new) owning faction — cascade by id
         let feed = uFeed[0];
         let kill = uKill[0];
@@ -595,10 +621,14 @@
         const Kfix = int(kill.mul(FXf));
         // reaction a·b²/FX² (staged so each product stays within i32)
         const ab = ax.mul(bx).div(FXi);
-        const reac = ab.mul(bx).div(FXi);
-        // innerA = Da·lapA − reaction + F·(1−A);  Da=1 → lapA = L20a/20
-        const innerA = L20a.div(int(20)).sub(reac).add(Ffix.mul(FXi.sub(ax)).div(FXi));
-        // innerB = Db·lapB + reaction − (k+F)·B;  Db=0.5 → lapB = L20b/40
+        const reac0 = ab.mul(bx).div(FXi);
+        // temperature scales GROWTH (reaction + feed) but NOT the kill term, so
+        // cold starves life (it dies toward the poles) instead of just pausing.
+        const reac = reac0.mul(Tfix).div(int(TSCALE));
+        const feedT = Ffix.mul(FXi.sub(ax)).div(FXi).mul(Tfix).div(int(TSCALE));
+        // innerA = Da·lapA − reaction + F·(1−A)·T;  Da=1 → lapA = L20a/20
+        const innerA = L20a.div(int(20)).sub(reac).add(feedT);
+        // innerB = Db·lapB + reaction − (k+F)·B;  Db=0.5 → lapB = L20b/40 (kill unscaled)
         const innerB = L20b.div(int(40)).add(reac).sub(Kfix.add(Ffix).mul(bx).div(FXi));
         const A2 = float(ax.add(innerA).max(int(0)).min(FXi));   // dt = 1
         const B2 = float(bx.add(innerB).max(int(0)).min(FXi));
@@ -783,7 +813,7 @@
     function updateScoreUI(totals) {
       for (let k = 0; k < K; k++) territory[k] = totals[k];
       for (let k = 1; k < K; k++) {
-        const pct = 100 * totals[k] / CELLS;
+        const pct = 100 * totals[k] / LIVE_CELLS;
         scoreBars[k].fill.style.width = pct.toFixed(1) + '%';
         scoreBars[k].pct.textContent = Math.round(pct) + '%';
       }
@@ -930,7 +960,9 @@
       else { game.activeAIs = AIS.slice(0, P.aiCount); game.aiControlled = game.activeAIs.slice(); }
       const arr = bufA.array;
       for (let i = 0; i < CELLS; i++) { arr[i*4]=FX; arr[i*4+1]=0; arr[i*4+2]=0; arr[i*4+3]=0; }
-      const spots = [[0.20, 0.80], [0.80, 0.74], [0.50, 0.20]];
+      // spawn on the warm equator (v≈0.5), on opposite longitudes → opposite
+      // sides of the eventual globe. [u, v]; player, then AIs/guest.
+      const spots = [[0.25, 0.5], [0.75, 0.5], [0.5, 0.5]];
       seedDiskCPU((N * spots[0][0]) | 0, (N * spots[0][1]) | 0, BR[1], PLAYER);
       game.activeAIs.forEach((fac, k) => seedDiskCPU((N * spots[k + 1][0]) | 0, (N * spots[k + 1][1]) | 0, BR[1], fac));
       bufA.needsUpdate = true;
@@ -1011,11 +1043,11 @@
     function pctLine() {  // per-faction territory %, colour-coded
       return [PLAYER, ...game.activeAIs].map(f =>
         '<span style="color:' + cssColor(FACTIONS[f].color) + '">' + FACTIONS[f].name +
-        ' ' + Math.round(100 * territory[f] / CELLS) + '%</span>'
+        ' ' + Math.round(100 * territory[f] / LIVE_CELLS) + '%</span>'
       ).join(' &nbsp;·&nbsp; ');
     }
     function winLevel(nowSec, reason) {
-      const pPct = Math.round(100 * territory[PLAYER] / CELLS);
+      const pPct = Math.round(100 * territory[PLAYER] / LIVE_CELLS);
       // Efficiency: peaks at 50% held, falls to 0 at 0% / 100% — reward a tight
       // win, not a steamroll. Times the difficulty score multiplier.
       const eff = Math.max(0, 1 - Math.abs(pPct - 50) / 50);
@@ -1046,19 +1078,19 @@
       const nowSec = game.tick / TICK_HZ;
       if (nowSec < 1.5) return;                 // short grace once the round starts
       if (game.pvp) {  // 2-player: single match, winner = faction with most territory
-        for (const f of [PLAYER, ...game.activeAIs]) if (100 * territory[f] / CELLS >= game.P.winPct) return pvpEnd(f);
-        if (territory[0] / CELLS < FULL_NEUTRAL || nowSec >= game.P.roundSecs) return pvpEnd(bestFaction());
+        for (const f of [PLAYER, ...game.activeAIs]) if (100 * territory[f] / LIVE_CELLS >= game.P.winPct) return pvpEnd(f);
+        if ((territory[0] - FROZEN_CELLS) / LIVE_CELLS < FULL_NEUTRAL || nowSec >= game.P.roundSecs) return pvpEnd(bestFaction());
         return;
       }
       const win = game.P.winPct;
       for (const f of [PLAYER, ...game.activeAIs]) {
-        if (100 * territory[f] / CELLS >= win) {
+        if (100 * territory[f] / LIVE_CELLS >= win) {
           if (f === PLAYER) winLevel(nowSec, 'You reached ' + win + '% — knockout!');
           else loseGame(FACTIONS[f].name + ' reached ' + win + '% — knockout');
           return;
         }
       }
-      if (territory[0] / CELLS < FULL_NEUTRAL || nowSec >= game.P.roundSecs) {
+      if ((territory[0] - FROZEN_CELLS) / LIVE_CELLS < FULL_NEUTRAL || nowSec >= game.P.roundSecs) {
         const why = nowSec >= game.P.roundSecs ? "Time's up" : 'Field claimed';
         const bf = bestFaction();
         if (bf === PLAYER) winLevel(nowSec, why + ' — you held the most');
@@ -1401,7 +1433,7 @@
         if (net.mode !== 'solo') applyInput(net.remoteIn.get(T));
         // nutrient regen ∝ territory; only AI-controlled factions get the ramp
         for (const f of [PLAYER, ...game.activeAIs]) {
-          const frac = (territory[f] || 0) / CELLS;
+          const frac = (territory[f] || 0) / LIVE_CELLS;
           const mul = game.aiControlled.includes(f) ? P.aiRegenMul : 1;
           nut[f] = Math.min(P.nutMax, nut[f] + (P.nutRegen + P.nutPerTerr * frac) * mul * TICK_DT);
         }
