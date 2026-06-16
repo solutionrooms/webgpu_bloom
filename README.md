@@ -21,14 +21,13 @@ That keeps the whole loop on the GPU and sidesteps the one thing the GPU is bad 
 
 ## Play
 
-You are **Coral** (green). Two AI factions — **Bloom** (magenta) and **Spore** (amber) — contest the same field.
+You are **Coral** (green). Rival species — **Bloom** (magenta), **Spore** (amber) — contest the same living-chemistry field. **Clear each level by holding the most territory** when the timer ends (or reaching the win %); levels get tougher as you climb. Score accumulates; your best is saved.
 
-- **Left-drag** on the field to seed your living pattern; it spreads and claims territory. Seeding costs **nutrient** (regenerates faster the more territory you hold).
-- **Brush S / M / L** — bigger brush, bigger stamp, more nutrient.
-- **Win** by holding the most territory when the timer ends (or ≥55% at any point).
-- **R** — restart the round.
-
-Tip: seed into open neutral ground ahead of the fronts — that's how you out-claim the AI.
+- **Left-drag** the field to seed your pattern; it grows and claims territory.
+- Seeding spends **nutrient** (top-left bar), which refills faster the more territory you hold — an early lead snowballs. You **can't paint everywhere** — pick your spots, and seed open ground *ahead of the fronts* to out-claim the AI.
+- **Brush S / M / L** — bigger stamp, more nutrient.
+- **⚙ Settings** — tune the economy, opponents, match rules, tempo, and grid size live. **?** — full rules.
+- **R** new game · **Space** advance to next level.
 
 ## Run
 

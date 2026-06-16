@@ -44,6 +44,51 @@
       background: rgba(10,15,24,.85); border: 1px solid rgba(140,180,240,.25);
       font: 16px/1.5 system-ui, sans-serif; color: #cfe3ff; }
     #banner h1 { margin: 0 0 6px; font-size: 30px; }
+    #banner #banner-msg { margin: 0; font-size: 15px; line-height: 1.6; }
+    #banner .dim { opacity: .6; font-size: 13px; }
+
+    /* top-right buttons */
+    #topbtns { position: absolute; top: 12px; right: 12px; display: flex; gap: 8px; }
+    #topbtns button { width: 34px; height: 34px; padding: 0; font-size: 16px; }
+
+    /* stats extras */
+    #stats .big b { font-size: 16px; }
+    #stats .sep { height: 1px; background: rgba(120,160,220,.18); margin: 7px 0; }
+    #stats .dim2 { opacity: .5; font-size: 11px; }
+
+    /* settings panel */
+    #settings { position: fixed; top: 50%; right: 16px; transform: translateY(-50%);
+      width: 300px; max-height: 92vh; overflow-y: auto; display: none; z-index: 9; pointer-events: auto;
+      font: 13px/1.4 ui-monospace, Menlo, monospace; color: #cfe3ff; }
+    #settings.show { display: block; }
+    #settings h2 { margin: 2px 0 8px; font-size: 17px; color: #fff; }
+    #settings h3 { margin: 14px 0 6px; font-size: 10px; text-transform: uppercase;
+      letter-spacing: .08em; color: #7fb0e8; opacity: .85; }
+    #settings .srow { margin: 8px 0; }
+    #settings .stop { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 3px; }
+    #settings .stop b { color: #fff; }
+    #settings .dim { opacity: .5; }
+    #settings input[type=range] { width: 100%; accent-color: #2aa6ff; }
+    #settings select { width: 100%; margin-top: 4px; padding: 5px; background: rgba(20,28,44,.9);
+      color: #cfe3ff; border: 1px solid rgba(120,160,220,.25); border-radius: 8px; }
+    #settings .sbtns { display: flex; gap: 8px; margin-top: 16px; }
+    #settings .sbtns button { flex: 1; }
+
+    /* rules overlay */
+    #rules { position: fixed; inset: 0; display: none; place-items: center; padding: 20px;
+      background: rgba(3,5,9,.66); backdrop-filter: blur(4px); z-index: 12; pointer-events: auto; }
+    #rules.show { display: grid; }
+    #rules .card { max-width: 560px; padding: 24px 28px; border-radius: 16px;
+      background: rgba(10,15,24,.95); border: 1px solid rgba(140,180,240,.25);
+      font: 15px/1.55 system-ui, sans-serif; color: #cfe3ff; }
+    #rules h2 { margin: 0 0 8px; color: #fff; }
+    #rules ul { margin: 10px 0 0; padding-left: 20px; }
+    #rules li { margin: 6px 0; }
+
+    #settings button, #rules button { pointer-events: auto; cursor: pointer; font: inherit;
+      background: rgba(20,28,44,.9); color: #cfe3ff; border: 1px solid rgba(120,160,220,.3);
+      border-radius: 8px; padding: 8px 14px; }
+    #settings button:hover, #rules button:hover { border-color: rgba(150,190,255,.6); }
 
     #score { top: 168px; left: 12px; width: 184px; display: flex; flex-direction: column; gap: 6px; }
     #score .bar { position: relative; height: 18px; border-radius: 5px; overflow: hidden;
@@ -110,13 +155,23 @@
 
   <div id="hud">
     <div id="hint">Left-drag to grow your <b style="color:#5dffa6">Coral</b>. Claim the most territory before the timer ends. <b>R</b> restarts.</div>
+    <div id="topbtns">
+      <button id="help" title="How to play">?</button>
+      <button id="gear" title="Settings">⚙</button>
+    </div>
+
     <div id="stats" class="panel">
+      <div class="row big"><span>Level</span><b id="level">1</b></div>
+      <div class="row big"><span>Score</span><b id="score-val">0</b></div>
+      <div class="row"><span>Best</span><b id="best-val">0</b></div>
+      <div class="sep"></div>
       <div class="row"><span>Time</span><b id="time">—</b></div>
       <div class="row"><span>Nutrient</span><b id="nut">—</b></div>
       <div id="nutbar"><div id="nutfill"></div></div>
-      <div class="row" style="margin-top:4px"><span>Grid</span><b id="grid">—</b></div>
-      <div class="row"><span>GPU</span><b id="gpums">—</b></div>
-      <div class="row"><span>Backend</span><b id="backend">…</b></div>
+      <div class="sep"></div>
+      <div class="row dim2"><span>Grid</span><b id="grid">—</b></div>
+      <div class="row dim2"><span>GPU</span><b id="gpums">—</b></div>
+      <div class="row dim2"><span>Backend</span><b id="backend">…</b></div>
     </div>
 
     <div id="score" class="panel"></div>
@@ -134,7 +189,37 @@
   <div id="banner">
     <div class="card">
       <h1 id="banner-title">Victory</h1>
-      <p>Press <b>R</b> to play again</p>
+      <p id="banner-msg"></p>
+    </div>
+  </div>
+
+  <div id="settings" class="panel">
+    <h2>Settings</h2>
+    <div id="settings-body"></div>
+    <div class="srow">
+      <div class="stop"><span>Grid size <span class="dim">(reloads)</span></span></div>
+      <select id="gridsel"><option>256</option><option>512</option><option>1024</option><option>2048</option></select>
+    </div>
+    <div class="sbtns">
+      <button id="s-restart">Restart</button>
+      <button id="s-defaults">Defaults</button>
+      <button id="s-close">Close</button>
+    </div>
+  </div>
+
+  <div id="rules">
+    <div class="card">
+      <h2>How to play</h2>
+      <p>You are <b style="color:#5dffa6">Coral</b>. Rival species spread across the same living-chemistry field. Hold the <b>most territory</b> to clear each level — they get tougher as you climb.</p>
+      <ul>
+        <li><b>Left-drag</b> the field to seed your pattern; it grows and claims ground.</li>
+        <li>Seeding spends <b>nutrient</b> (top-left bar), which refills faster the more territory you hold — an early lead snowballs.</li>
+        <li>You can't paint everywhere — pick your spots. Seed <i>open ground ahead of the fronts</i> to out-claim the AI.</li>
+        <li><b>Brush S / M / L</b> — bigger stamp, more nutrient.</li>
+        <li>Clear a level by holding the most territory when time runs out (or reaching the win %). Higher levels add faster — then more — opponents.</li>
+        <li><b>R</b> new game &nbsp;·&nbsp; <b>Space</b> next level &nbsp;·&nbsp; <b>⚙</b> settings.</li>
+      </ul>
+      <button id="rules-close">Got it</button>
     </div>
   </div>
 
@@ -253,6 +338,7 @@
     // ---------------------------------------------------------------------------
     const uN = uniform(float(N));
     const uScale = uniform(new THREE.Vector2(1, 1)); // aspect correction (set on resize)
+    const uClaim = uniform(1); // 1 on claim-steps (territory may spread into neutral), else 0
     // Gray-Scott / diffusion constants (Karl Sims tutorial values — known-good).
     const uDa = uniform(float(1.0));    // diffusion of A
     const uDb = uniform(float(0.5));    // diffusion of B
@@ -371,6 +457,12 @@
         let ge = step(best.add(0.5), cnt1); owner = mix(owner, float(1), ge); best = mix(best, cnt1, ge);
         ge = step(best.add(0.5), cnt2);     owner = mix(owner, float(2), ge); best = mix(best, cnt2, ge);
         ge = step(best.add(0.5), cnt3);     owner = mix(owner, float(3), ge); best = mix(best, cnt3, ge);
+
+        // Gate claiming of NEUTRAL cells by uClaim. RD runs every frame (smooth)
+        // but territory only advances on claim-steps → smooth visuals + a slow,
+        // strategic spread rate. Combat between existing owners is unaffected.
+        const wasNeutral = step(c.z, 0.5);   // 1 if centre is neutral (c.z <= 0.5)
+        owner = mix(owner, c.z, wasNeutral.mul(uClaim.oneMinus()));
 
         // recipe of the (new) owning faction — cascade by id
         let feed = uFeed[0];
@@ -557,7 +649,7 @@
       }
     }
 
-    let lastScore = 0, scorePending = false, scoreGen = 0;
+    let lastScore = 0, scorePending = false, scoreGen = 0, lastTiles = null;
     function maybeScore(nowMs) {
       if (scorePending || nowMs - lastScore < 330) return;
       lastScore = nowMs; scorePending = true;
@@ -595,25 +687,51 @@
     // ---------------------------------------------------------------------------
     // GAME LAYER — nutrient economy, scripted AI, win/lose, restart
     // ---------------------------------------------------------------------------
-    const PLAYER = 1;                  // player's faction (Coral); rivals are AI
-    const AIS = [2, 3];               // AI-controlled factions
-    const WIN_PCT = 55;              // win at ≥ this % of the field [knob]
-    const ROUND_SECS = 45;          // round timer (seconds) [knob]
-    const FULL_NEUTRAL = 0.02;      // field considered "full" below this neutral fraction
-    const NUT_MAX = 120, NUT_BASE = 12, NUT_PER_TERR = 26; // regen/sec = base + perTerr·frac
-    const SEED_COST = 22;           // nutrient/sec while seeding (× brush-area factor)
-    const AI_INTERVAL = 3.0;        // seconds between an AI faction's seeds
-    let STEP_RATE = 9;              // RD steps/sec — pattern tempo & spread speed [knob]
+    const PLAYER = 1;                 // player's faction (Coral); rivals are AI
+    const AIS = [2, 3];              // available AI factions
+    const FULL_NEUTRAL = 0.015;     // field "claimed" below this neutral fraction
 
-    const game = { running: false, winner: 0, nutrient: NUT_MAX, tStart: 0, aiNext: [] };
+    // Live-tunable base config (Settings). Defaults make nutrient scarce so each
+    // seed is a choice; the AI has its own economy; territory spreads slowly.
+    const DEFAULTS = {
+      nutMax: 110, nutRegen: 9, nutPerTerr: 16, seedCost: 24,  // your economy
+      aiInterval: 2.6, aiSeedCost: 38,                         // AI economy (levels ramp these up)
+      winPct: 60, roundSecs: 60, spread: 14,                   // match (spread = cells/sec)
+    };
+    const cfg = { ...DEFAULTS };
+
+    // Per-level difficulty ramp derived from cfg.
+    function levelParams(L) {
+      return {
+        aiCount: Math.min(AIS.length, 1 + Math.floor((L - 1) / 2)),  // 1,1,2,2,…
+        aiInterval: Math.max(0.5, cfg.aiInterval * Math.pow(0.9, L - 1)),
+        aiSeedCost: Math.max(8, cfg.aiSeedCost - (L - 1) * 2),
+        spread: cfg.spread * (1 + 0.07 * (L - 1)),
+        nutMax: cfg.nutMax, nutRegen: cfg.nutRegen, nutPerTerr: cfg.nutPerTerr,
+        seedCost: cfg.seedCost, winPct: cfg.winPct, roundSecs: cfg.roundSecs,
+      };
+    }
+
+    let highScore = parseInt(localStorage.getItem('bloom_high') || '0', 10) || 0;
+    const game = {
+      state: 'playing',          // 'playing' | 'cleared' | 'over'
+      level: 1, score: 0, winner: 0, tStart: 0, claimAcc: 0,
+      P: levelParams(1), activeAIs: [AIS[0]], aiNext: [],
+    };
+    const nut = new Float32Array(K);  // nutrient per faction (index 0 unused)
     const aiSeeds = [];
-    let lastFrame = performance.now(), stepAcc = 0;
+    let lastFrame = performance.now();
 
     const $banner = document.getElementById('banner');
     const $bannerTitle = document.getElementById('banner-title');
+    const $bannerMsg = document.getElementById('banner-msg');
     const $nut = document.getElementById('nut');
     const $nutfill = document.getElementById('nutfill');
     const $time = document.getElementById('time');
+    const $level = document.getElementById('level');
+    const $score = document.getElementById('score-val');
+    const $best = document.getElementById('best-val');
+    $best.textContent = highScore;
 
     function seedDiskCPU(cx, cy, r, owner) {
       const arr = bufA.array;
@@ -623,54 +741,142 @@
         arr[i] = 1; arr[i + 1] = 1; arr[i + 2] = owner;
       }
     }
-    function newRound() {
+    function startLevel() {
+      const P = game.P = levelParams(game.level);
+      game.activeAIs = AIS.slice(0, P.aiCount);
       const arr = bufA.array;
       for (let i = 0; i < CELLS; i++) { arr[i*4]=1; arr[i*4+1]=0; arr[i*4+2]=0; arr[i*4+3]=0; }
-      seedDiskCPU((N * 0.20) | 0, (N * 0.80) | 0, 14, PLAYER);
-      seedDiskCPU((N * 0.80) | 0, (N * 0.76) | 0, 14, AIS[0]);
-      seedDiskCPU((N * 0.52) | 0, (N * 0.20) | 0, 14, AIS[1]);
+      const spots = [[0.20, 0.80], [0.80, 0.74], [0.50, 0.20]];
+      seedDiskCPU((N * spots[0][0]) | 0, (N * spots[0][1]) | 0, BR[1], PLAYER);
+      game.activeAIs.forEach((fac, k) => seedDiskCPU((N * spots[k + 1][0]) | 0, (N * spots[k + 1][1]) | 0, BR[1], fac));
       bufA.needsUpdate = true;
       territory.fill(0); territory[0] = CELLS;   // assume all-neutral until first readback
       scoreGen++;                                // invalidate any in-flight readback
-      game.running = true; game.winner = 0; game.nutrient = NUT_MAX;
+      nut.fill(P.nutMax);
+      game.state = 'playing'; game.winner = 0; game.claimAcc = 0;
       game.tStart = performance.now();
-      game.aiNext = AIS.map((_, k) => AI_INTERVAL * (0.6 + 0.5 * k));
+      game.aiNext = game.activeAIs.map((_, k) => P.aiInterval * (0.4 + 0.4 * k));
       $banner.classList.remove('show');
     }
+    function newGame() { game.level = 1; game.score = 0; startLevel(); }
 
+    function aiPickTarget() {  // seed toward the most-neutral region (samples the score tiles)
+      if (!lastTiles) return { cx: (Math.random() * N) | 0, cy: (Math.random() * N) | 0 };
+      let bt = (Math.random() * TILES) | 0, best = lastTiles[bt * K];
+      for (let s = 0; s < 80; s++) { const t = (Math.random() * TILES) | 0; const n0 = lastTiles[t * K]; if (n0 > best) { best = n0; bt = t; } }
+      const c0 = bt * SPAN + (SPAN >> 1);
+      const jx = ((Math.random() * 30) | 0) - 15, jy = ((Math.random() * 30) | 0) - 15;
+      return { cx: ((c0 % N) + jx + N) % N, cy: (Math.floor(c0 / N) + jy + N) % N };
+    }
     function aiTick(nowSec) {
-      AIS.forEach((fac, k) => {
-        if (nowSec >= game.aiNext[k]) {
-          game.aiNext[k] = nowSec + AI_INTERVAL;
-          aiSeeds.push({ cx: (Math.random() * N) | 0, cy: (Math.random() * N) | 0, r: 12, owner: fac });
+      const P = game.P;
+      game.activeAIs.forEach((fac, k) => {
+        if (nowSec >= game.aiNext[k] && nut[fac] >= P.aiSeedCost) {
+          game.aiNext[k] = nowSec + P.aiInterval;
+          nut[fac] -= P.aiSeedCost;
+          const t = aiPickTarget();
+          aiSeeds.push({ cx: t.cx, cy: t.cy, r: BR[1], owner: fac });
         }
       });
     }
 
-    function endRound(winner) {
-      game.running = false; game.winner = winner;
-      $bannerTitle.textContent = winner === PLAYER ? 'You win' : FACTIONS[winner].name + ' wins';
-      $bannerTitle.style.color = cssColor(FACTIONS[winner].color);
-      $banner.classList.add('show');
+    function showBanner(title, color, msg) {
+      $bannerTitle.textContent = title; $bannerTitle.style.color = color;
+      $bannerMsg.innerHTML = msg; $banner.classList.add('show');
     }
     function bestFaction() {
       let bf = 0, bv = -1;
-      for (let f = 1; f < K; f++) if (territory[f] > bv) { bv = territory[f]; bf = f; }
+      for (const f of [PLAYER, ...game.activeAIs]) if (territory[f] > bv) { bv = territory[f]; bf = f; }
       return bf;
     }
-    function checkWin(nowSec) {
-      if (!game.running || nowSec < 2.0) return;   // grace period (let scores settle)
-      for (let f = 1; f < K; f++) if (100 * territory[f] / CELLS >= WIN_PCT) return endRound(f);
-      if (territory[0] / CELLS < FULL_NEUTRAL) return endRound(bestFaction()); // field claimed
-      if (nowSec >= ROUND_SECS) return endRound(bestFaction());
+    function winLevel(nowSec) {
+      const pPct = Math.round(100 * territory[PLAYER] / CELLS);
+      const timeBonus = Math.round(Math.max(0, game.P.roundSecs - nowSec)) * 2;
+      const bonus = game.level * 100 + pPct * 5 + timeBonus;
+      game.score += bonus; game.state = 'cleared'; $score.textContent = game.score;
+      showBanner('Level ' + game.level + ' cleared', cssColor(FACTIONS[PLAYER].color),
+        '+' + bonus + ' &nbsp;·&nbsp; held ' + pPct + '%<br><span class="dim">advancing… (Space)</span>');
+      game.level++;
+      setTimeout(() => { if (game.state === 'cleared') startLevel(); }, 2600);
+    }
+    function loseGame() {
+      game.state = 'over';
+      let best = '';
+      if (game.score > highScore) {
+        highScore = game.score; localStorage.setItem('bloom_high', String(highScore));
+        $best.textContent = highScore; best = '<br><span style="color:#ffd24a">★ New best!</span>';
+      }
+      showBanner('Game over', '#ff7a7a',
+        'Reached level ' + game.level + ' &nbsp;·&nbsp; score ' + game.score + best +
+        '<br><span class="dim">Press R to play again</span>');
+    }
+    function checkLevel(nowSec) {
+      if (game.state !== 'playing' || nowSec < 2.0) return;
+      for (const f of [PLAYER, ...game.activeAIs]) {
+        if (100 * territory[f] / CELLS >= game.P.winPct) { f === PLAYER ? winLevel(nowSec) : loseGame(); return; }
+      }
+      if (territory[0] / CELLS < FULL_NEUTRAL || nowSec >= game.P.roundSecs) {
+        bestFaction() === PLAYER ? winLevel(nowSec) : loseGame();
+      }
     }
     function updateGameHUD(nowSec) {
-      $nut.textContent = Math.round(game.nutrient);
-      $nutfill.style.width = (100 * game.nutrient / NUT_MAX) + '%';
-      $time.textContent = game.running ? Math.max(0, ROUND_SECS - nowSec).toFixed(0) + 's' : '—';
+      $nut.textContent = Math.round(nut[PLAYER]);
+      $nutfill.style.width = (100 * nut[PLAYER] / game.P.nutMax) + '%';
+      $time.textContent = game.state === 'playing' ? Math.max(0, game.P.roundSecs - nowSec).toFixed(0) + 's' : '—';
+      $level.textContent = game.level;
+      $score.textContent = game.score;
     }
 
-    window.addEventListener('keydown', (e) => { if (e.key === 'r' || e.key === 'R') newRound(); });
+    window.addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+      if (e.key === 'r' || e.key === 'R') newGame();
+      else if ((e.key === ' ' || e.key === 'Enter') && game.state === 'cleared') startLevel();
+    });
+
+    // ---------------------------------------------------------------------------
+    // Settings panel + Rules overlay
+    // ---------------------------------------------------------------------------
+    const SETTINGS = [
+      { sec: 'Your economy' },
+      { key: 'nutMax', label: 'Nutrient bank', min: 20, max: 300, step: 10 },
+      { key: 'nutRegen', label: 'Regen / sec', min: 0, max: 40, step: 1 },
+      { key: 'nutPerTerr', label: 'Regen bonus × territory', min: 0, max: 80, step: 2 },
+      { key: 'seedCost', label: 'Seed cost / sec', min: 5, max: 150, step: 5 },
+      { sec: 'Opponents (base — levels ramp these up)' },
+      { key: 'aiInterval', label: 'AI seed interval (s)', min: 0.4, max: 8, step: 0.2, dec: 1 },
+      { key: 'aiSeedCost', label: 'AI seed cost', min: 5, max: 150, step: 5 },
+      { sec: 'Match' },
+      { key: 'winPct', label: 'Win at % territory', min: 30, max: 100, step: 5 },
+      { key: 'roundSecs', label: 'Round length (s)', min: 20, max: 240, step: 5 },
+      { key: 'spread', label: 'Spread speed', min: 4, max: 60, step: 1 },
+    ];
+    const $settings = document.getElementById('settings');
+    function buildSettings() {
+      const body = document.getElementById('settings-body'); body.innerHTML = '';
+      for (const s of SETTINGS) {
+        if (s.sec) { const h = document.createElement('h3'); h.textContent = s.sec; body.appendChild(h); continue; }
+        const row = document.createElement('div'); row.className = 'srow';
+        const top = document.createElement('div'); top.className = 'stop';
+        const name = document.createElement('span'); name.textContent = s.label;
+        const val = document.createElement('b');
+        const inp = document.createElement('input'); inp.type = 'range';
+        inp.min = s.min; inp.max = s.max; inp.step = s.step; inp.value = cfg[s.key];
+        const show = () => { val.textContent = s.dec ? (+cfg[s.key]).toFixed(s.dec) : cfg[s.key]; };
+        inp.addEventListener('input', () => { cfg[s.key] = parseFloat(inp.value); show(); });
+        show(); top.append(name, val); row.append(top, inp); body.appendChild(row);
+      }
+    }
+    buildSettings();
+    const gridsel = document.getElementById('gridsel'); gridsel.value = String(N);
+    gridsel.addEventListener('change', () => { const p = new URLSearchParams(location.search); p.set('n', gridsel.value); location.search = p.toString(); });
+    document.getElementById('gear').addEventListener('click', () => $settings.classList.toggle('show'));
+    document.getElementById('s-close').addEventListener('click', () => $settings.classList.remove('show'));
+    document.getElementById('s-restart').addEventListener('click', () => { $settings.classList.remove('show'); newGame(); });
+    document.getElementById('s-defaults').addEventListener('click', () => { Object.assign(cfg, DEFAULTS); buildSettings(); });
+    const $rules = document.getElementById('rules');
+    document.getElementById('help').addEventListener('click', () => $rules.classList.toggle('show'));
+    document.getElementById('rules-close').addEventListener('click', () => $rules.classList.remove('show'));
+    $rules.addEventListener('click', (e) => { if (e.target === $rules) $rules.classList.remove('show'); });
 
     // ---------------------------------------------------------------------------
     // Loop
@@ -680,10 +886,13 @@
       const dt = Math.min(0.05, (now - lastFrame) / 1000); lastFrame = now;
       const nowSec = (now - game.tStart) / 1000;
 
-      if (game.running) {
-        // nutrient regen ∝ territory
-        const frac = (territory[PLAYER] || 0) / CELLS;
-        game.nutrient = Math.min(NUT_MAX, game.nutrient + (NUT_BASE + NUT_PER_TERR * frac) * dt);
+      const P = game.P;
+      if (game.state === 'playing') {
+        // nutrient regen ∝ territory, for every active faction
+        for (const f of [PLAYER, ...game.activeAIs]) {
+          const frac = (territory[f] || 0) / CELLS;
+          nut[f] = Math.min(P.nutMax, nut[f] + (P.nutRegen + P.nutPerTerr * frac) * dt);
+        }
 
         // AI seeding (save/restore the player's brush around AI stamps)
         aiTick(nowSec);
@@ -696,25 +905,30 @@
 
         // player seeding — gated by nutrient (cost ∝ brush area)
         const wantSeed = (uBrushActive.value > 0.5 || pendingSeed) && Math.round(uBrush.value.w) === PLAYER;
-        const cost = SEED_COST * (uBrush.value.z * uBrush.value.z) / (BR[1] * BR[1]) * dt;
-        if (wantSeed && game.nutrient >= cost) { renderer.compute(seedA); game.nutrient -= cost; }
+        const cost = P.seedCost * (uBrush.value.z * uBrush.value.z) / (BR[1] * BR[1]) * dt;
+        if (wantSeed && nut[PLAYER] >= cost) { renderer.compute(seedA); nut[PLAYER] -= cost; }
       }
       pendingSeed = false;
 
-      // RD steps — time-throttled, EVEN count per frame so it ends in bufA
-      stepAcc += STEP_RATE * dt;
-      let nSteps = Math.floor(stepAcc); nSteps -= nSteps % 2; if (nSteps > 16) nSteps = 16;
-      stepAcc -= nSteps;
-      for (let s = 0; s < nSteps; s++) renderer.compute((s & 1) === 0 ? stepAB : stepBA);
+      // RD: 2 steps every frame (smooth, even → ends in bufA). Territory only
+      // advances on claim-steps, metered to ≈ spread cells/sec — slow & strategic.
+      const STEPS = 2;
+      game.claimAcc += (game.state === 'playing' ? P.spread : 0) * dt;
+      let claims = Math.floor(game.claimAcc); if (claims > STEPS) claims = STEPS;
+      game.claimAcc -= claims;
+      for (let s = 0; s < STEPS; s++) {
+        uClaim.value = (s < claims) ? 1 : 0;
+        renderer.compute((s & 1) === 0 ? stepAB : stepBA);
+      }
 
       renderer.render(scene, camera);
       maybeScore(now);
       maybeGpuMs(now);
-      checkWin(nowSec);
+      checkLevel(nowSec);
       updateGameHUD(nowSec);
     }
     lastFrame = performance.now();
-    newRound();
+    newGame();
     renderer.setAnimationLoop(animate);
     document.getElementById('loading').classList.add('hide');
     setTimeout(() => document.getElementById('hint').classList.add('hide'), 9000);
@@ -722,9 +936,8 @@
     // Expose for dev probing (removed before ship).
     window.__bloom = {
       THREE, renderer, scene, camera, material, bufA, bufB, N, FACTIONS, CELLS,
-      uDt, uBrush, uBrushActive, uFeed, uKill, uColor,
-      scoreBuf, scoreFromA, territory, TILES, K, game,
-      newRound, setRate: (n) => { STEP_RATE = n; return STEP_RATE; },
+      uDt, uBrush, uBrushActive, uFeed, uKill, uColor, uClaim, cfg,
+      scoreBuf, scoreFromA, territory, TILES, K, game, newGame, startLevel,
       faction: (idx) => selectFaction(idx),
       // dev: stamp at a normalised position (0..1) as `owner`, holding for `ms`
       stamp: (u, v, owner = 1, radius = 12, ms = 300) => {
@@ -737,7 +950,7 @@
         setTimeout(() => { uBrushActive.value = 0; }, ms);
       },
     };
-    console.log('[bloom] M7 ready — backend:', renderer.backend.isWebGPUBackend ? 'WebGPU' : 'other', 'grid', N, 'rate', STEP_RATE, 'tiles', TILES);
+    console.log('[bloom] ready — backend:', renderer.backend.isWebGPUBackend ? 'WebGPU' : 'other', 'grid', N, 'tiles', TILES);
   </script>
 </body>
 </html>
