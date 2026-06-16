@@ -771,7 +771,7 @@
     // seed is a choice; the AI has its own economy; territory spreads slowly.
     const DEFAULTS = {
       nutMax: 110, nutRegen: 9, nutPerTerr: 16, seedCost: 24,  // your economy
-      aiInterval: 2.8, aiSeedCost: 40,                         // AI economy (levels ramp these up)
+      aiInterval: 2.2, aiSeedCost: 40,                         // AI economy (levels ramp these up)
       winPct: 75, roundSecs: 50, spread: 9,                    // match (spread = cells/sec)
       difficulty: 1,                                           // index into DIFF
       light: 65,                                               // 3D lighting 0–100 (display only)
@@ -854,13 +854,20 @@
     }
     function newGame() { game.level = 1; game.score = 0; startLevel(); }
 
-    function aiPickTarget() {  // seed toward the most-neutral region (samples the score tiles)
-      if (!lastTiles) return { cx: (Math.random() * N) | 0, cy: (Math.random() * N) | 0 };
-      let bt = (Math.random() * TILES) | 0, best = lastTiles[bt * K];
-      for (let s = 0; s < 80; s++) { const t = (Math.random() * TILES) | 0; const n0 = lastTiles[t * K]; if (n0 > best) { best = n0; bt = t; } }
-      const c0 = bt * SPAN + (SPAN >> 1);
+    function aiPickTarget() {  // seed neutral ground, biased toward the CENTRE so
+      const cC = N * 0.5;       // the AI actively contests the valuable middle
+      if (!lastTiles) return { cx: (cC + (Math.random() * N * 0.4 - N * 0.2)) | 0, cy: (cC + (Math.random() * N * 0.4 - N * 0.2)) | 0 };
+      let bestScore = -1e9, bx = cC, by = cC;
+      for (let s = 0; s < 90; s++) {
+        const t = (Math.random() * TILES) | 0;
+        const c0 = t * SPAN + (SPAN >> 1);
+        const tx = c0 % N, ty = (c0 / N) | 0;
+        const dist = Math.hypot(tx - cC, ty - cC);
+        const score = lastTiles[t * K] - dist * 0.5;   // high neutral + central
+        if (score > bestScore) { bestScore = score; bx = tx; by = ty; }
+      }
       const jx = ((Math.random() * 30) | 0) - 15, jy = ((Math.random() * 30) | 0) - 15;
-      return { cx: ((c0 % N) + jx + N) % N, cy: (Math.floor(c0 / N) + jy + N) % N };
+      return { cx: (bx + jx + N) % N, cy: (by + jy + N) % N };
     }
     function aiTick(nowSec) {
       const P = game.P;
@@ -869,7 +876,7 @@
           game.aiNext[k] = nowSec + P.aiInterval;
           nut[fac] -= P.aiSeedCost;
           const t = aiPickTarget();
-          aiSeeds.push({ cx: t.cx, cy: t.cy, r: BR[1], owner: fac });
+          aiSeeds.push({ cx: t.cx, cy: t.cy, r: BR[2], owner: fac });  // big aggressive claim
         }
       });
     }
