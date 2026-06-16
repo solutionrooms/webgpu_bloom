@@ -49,7 +49,9 @@
 
     /* top-right buttons */
     #topbtns { position: absolute; top: 12px; right: 12px; display: flex; gap: 8px; }
-    #topbtns button { width: 34px; height: 34px; padding: 0; font-size: 16px; }
+    #topbtns button { height: 34px; padding: 0 13px; font-size: 13px; }
+    #topbtns #gear { width: 34px; padding: 0; font-size: 16px; }
+    #topbtns #sound.on { background: #1d5bd6; border-color: #3a7bff; color: #fff; }
 
     /* stats extras */
     #stats .big b { font-size: 16px; }
@@ -74,21 +76,23 @@
     #settings .sbtns { display: flex; gap: 8px; margin-top: 16px; }
     #settings .sbtns button { flex: 1; }
 
-    /* rules overlay */
-    #rules { position: fixed; inset: 0; display: none; place-items: center; padding: 20px;
-      background: rgba(3,5,9,.66); backdrop-filter: blur(4px); z-index: 12; pointer-events: auto; }
-    #rules.show { display: grid; }
-    #rules .card { max-width: 560px; padding: 24px 28px; border-radius: 16px;
+    /* rules / technology overlays */
+    #rules, #tech { position: fixed; inset: 0; display: none; place-items: center; padding: 20px;
+      background: rgba(3,5,9,.66); backdrop-filter: blur(4px); z-index: 12; pointer-events: auto; overflow-y: auto; }
+    #rules.show, #tech.show { display: grid; }
+    #rules .card, #tech .card { max-width: 580px; padding: 24px 28px; border-radius: 16px;
       background: rgba(10,15,24,.95); border: 1px solid rgba(140,180,240,.25);
       font: 15px/1.55 system-ui, sans-serif; color: #cfe3ff; }
-    #rules h2 { margin: 0 0 8px; color: #fff; }
-    #rules ul { margin: 10px 0 0; padding-left: 20px; }
-    #rules li { margin: 6px 0; }
+    #rules h2, #tech h2 { margin: 0 0 8px; color: #fff; }
+    #rules ul, #tech ul { margin: 10px 0 0; padding-left: 20px; }
+    #rules li, #tech li { margin: 7px 0; }
+    #tech p { margin: 10px 0 0; }
+    #tech .dim { opacity: .62; font-size: 13.5px; }
 
-    #settings button, #rules button { pointer-events: auto; cursor: pointer; font: inherit;
+    #settings button, #rules button, #tech button { pointer-events: auto; cursor: pointer; font: inherit;
       background: rgba(20,28,44,.9); color: #cfe3ff; border: 1px solid rgba(120,160,220,.3);
       border-radius: 8px; padding: 8px 14px; }
-    #settings button:hover, #rules button:hover { border-color: rgba(150,190,255,.6); }
+    #settings button:hover, #rules button:hover, #tech button:hover { border-color: rgba(150,190,255,.6); }
 
     #score { top: 168px; left: 12px; width: 184px; display: flex; flex-direction: column; gap: 6px; }
     #score .bar { position: relative; height: 18px; border-radius: 5px; overflow: hidden;
@@ -156,7 +160,9 @@
   <div id="hud">
     <div id="hint">Left-drag to grow your <b style="color:#5dffa6">Coral</b>. Claim the most territory before the timer ends. <b>R</b> restarts.</div>
     <div id="topbtns">
-      <button id="help" title="How to play">?</button>
+      <button id="help">How to play</button>
+      <button id="techbtn">Technology</button>
+      <button id="sound" title="Ambient sound">♪ Sound</button>
       <button id="gear" title="Settings">⚙</button>
     </div>
 
@@ -164,6 +170,7 @@
       <div class="row big"><span>Level</span><b id="level">1</b></div>
       <div class="row big"><span>Score</span><b id="score-val">0</b></div>
       <div class="row"><span>Best</span><b id="best-val">0</b></div>
+      <div class="row"><span>Difficulty</span><b id="diff-val">Normal</b></div>
       <div class="sep"></div>
       <div class="row"><span>Time</span><b id="time">—</b></div>
       <div class="row"><span>Nutrient</span><b id="nut">—</b></div>
@@ -195,6 +202,10 @@
 
   <div id="settings" class="panel">
     <h2>Settings</h2>
+    <div class="srow" style="margin-top:6px">
+      <div class="stop"><span>Difficulty <span class="dim">(stronger AI, ×score)</span></span></div>
+      <select id="diffsel"><option>Easy</option><option>Normal</option><option>Hard</option></select>
+    </div>
     <div id="settings-body"></div>
     <div class="srow">
       <div class="stop"><span>Grid size <span class="dim">(reloads)</span></span></div>
@@ -213,13 +224,29 @@
       <p>You are <b style="color:#5dffa6">Coral</b>. Rival species spread across the same living-chemistry field. Hold the <b>most territory</b> to clear each level — they get tougher as you climb.</p>
       <ul>
         <li><b>Left-drag</b> the field to seed your pattern; it grows and claims ground.</li>
-        <li>Seeding spends <b>nutrient</b> (top-left bar), which refills faster the more territory you hold — an early lead snowballs.</li>
-        <li>You can't paint everywhere — pick your spots. Seed <i>open ground ahead of the fronts</i> to out-claim the AI.</li>
-        <li><b>Brush S / M / L</b> — bigger stamp, more nutrient.</li>
-        <li>Clear a level by holding the most territory when time runs out (or reaching the win %). Higher levels add faster — then more — opponents.</li>
-        <li><b>R</b> new game &nbsp;·&nbsp; <b>Space</b> next level &nbsp;·&nbsp; <b>⚙</b> settings.</li>
+        <li>The <b>Nutrient meter (top-left)</b> limits how much you can seed: seeding drains it, and it refills over time — faster the more territory you hold. You can't spam — pick your spots.</li>
+        <li>Seed <i>open ground ahead of the fronts</i> to out-claim the AI. <b>Brush S / M / L</b> — bigger stamp, more nutrient.</li>
+        <li><b>Scoring:</b> you score most for clearing a level holding <b>~50%</b> — a tight win beats a steamroll, and hoarding (or barely scraping by) scores less. <b>Harder difficulty multiplies your score</b> (Easy ×1, Normal ×2, Hard ×4).</li>
+        <li>Clear a level by holding the most territory when time runs out (or reaching the win %). Higher levels — and harder difficulty — bring faster, then more, opponents.</li>
+        <li><b>R</b> new game &nbsp;·&nbsp; <b>Space</b> next level &nbsp;·&nbsp; <b>♪</b> ambient sound &nbsp;·&nbsp; <b>⚙</b> settings.</li>
       </ul>
       <button id="rules-close">Got it</button>
+    </div>
+  </div>
+
+  <div id="tech">
+    <div class="card">
+      <h2>How it works</h2>
+      <p>Bloom is a deliberate showcase of <b>WebGPU compute</b>: the entire world — a grid of <b>~¼&nbsp;million cells</b> (over a million at higher grid sizes) — is simulated <i>and</i> scored <b>on your graphics card</b>, every frame. The CPU only injects your brush strokes and reads a tiny score back a few times a second.</p>
+      <ul>
+        <li><b>The field is chemistry.</b> Every cell holds two reacting chemicals evolving by the <b>Gray-Scott reaction-diffusion</b> equations — that's what produces the living spots, worms and branches, and why patterns spread, starve their own interiors, and form fighting fronts.</li>
+        <li><b>Factions are recipes.</b> Each species is a different feed/kill pair, so they grow with genuinely different shapes and behaviour — the "meta" lives in the chemistry, not in scripted units.</li>
+        <li><b>Compute shaders</b> advance all cells in parallel each frame; <b>ownership &amp; combat</b> (who holds a cell, whose front pushes) are resolved per-cell on the GPU as well.</li>
+        <li><b>Scoring is a GPU reduction.</b> Territory per faction is tallied on the card and only a tiny buffer (~16&nbsp;KB) is read back ~3×/second — never the whole field. That keeps the entire game loop GPU-resident.</li>
+        <li><b>No build step.</b> One self-contained HTML file using <b>three.js r0.184 + TSL</b> (Three Shading Language) loaded from a CDN, served as a static page on GitHub Pages.</li>
+      </ul>
+      <p class="dim">Why WebGPU: compute shaders, storage buffers and on-GPU reduction make this possible — WebGL2 has none of them. It's a game that deliberately can't exist without GPU compute.</p>
+      <button id="tech-close">Close</button>
     </div>
   </div>
 
@@ -701,18 +728,26 @@
       nutMax: 110, nutRegen: 9, nutPerTerr: 16, seedCost: 24,  // your economy
       aiInterval: 2.8, aiSeedCost: 40,                         // AI economy (levels ramp these up)
       winPct: 75, roundSecs: 50, spread: 9,                    // match (spread = cells/sec)
+      difficulty: 1,                                           // index into DIFF
     };
     const cfg = { ...DEFAULTS };
+    // Difficulty: stronger AI AND a bigger score multiplier on the harder ones.
+    const DIFF = [
+      { name: 'Easy',   ai: 0.7, score: 1 },
+      { name: 'Normal', ai: 1.0, score: 2 },
+      { name: 'Hard',   ai: 1.5, score: 4 },
+    ];
 
     // Per-level difficulty ramp derived from cfg. Higher levels: more, faster,
     // cheaper, richer AI + slightly faster spread.
     function levelParams(L) {
       const t = L - 1;
+      const ai = (DIFF[cfg.difficulty] || DIFF[1]).ai;  // difficulty AI-strength factor
       return {
         aiCount: Math.min(AIS.length, 1 + Math.floor(t / 2)),         // 1,1,2,2,…
-        aiInterval: Math.max(0.45, cfg.aiInterval * Math.pow(0.85, t)),
+        aiInterval: Math.max(0.4, cfg.aiInterval * Math.pow(0.85, t) / ai),
         aiSeedCost: Math.max(8, cfg.aiSeedCost - 3 * t),
-        aiRegenMul: 1 + 0.18 * t,                                     // AIs get richer each level
+        aiRegenMul: (1 + 0.18 * t) * ai,                              // AIs get richer each level / difficulty
         spread: cfg.spread * (1 + 0.08 * t),
         nutMax: cfg.nutMax, nutRegen: cfg.nutRegen, nutPerTerr: cfg.nutPerTerr,
         seedCost: cfg.seedCost, winPct: cfg.winPct, roundSecs: cfg.roundSecs,
@@ -738,6 +773,7 @@
     const $level = document.getElementById('level');
     const $score = document.getElementById('score-val');
     const $best = document.getElementById('best-val');
+    const $diff = document.getElementById('diff-val');
     $best.textContent = highScore;
 
     function seedDiskCPU(cx, cy, r, owner) {
@@ -796,34 +832,53 @@
       for (const f of [PLAYER, ...game.activeAIs]) if (territory[f] > bv) { bv = territory[f]; bf = f; }
       return bf;
     }
-    function winLevel(nowSec) {
+    function pctLine() {  // per-faction territory %, colour-coded
+      return [PLAYER, ...game.activeAIs].map(f =>
+        '<span style="color:' + cssColor(FACTIONS[f].color) + '">' + FACTIONS[f].name +
+        ' ' + Math.round(100 * territory[f] / CELLS) + '%</span>'
+      ).join(' &nbsp;·&nbsp; ');
+    }
+    function winLevel(nowSec, reason) {
       const pPct = Math.round(100 * territory[PLAYER] / CELLS);
-      const timeBonus = Math.round(Math.max(0, game.P.roundSecs - nowSec)) * 2;
-      const bonus = game.level * 100 + pPct * 5 + timeBonus;
+      // Efficiency: peaks at 50% held, falls to 0 at 0% / 100% — reward a tight
+      // win, not a steamroll. Times the difficulty score multiplier.
+      const eff = Math.max(0, 1 - Math.abs(pPct - 50) / 50);
+      const mul = (DIFF[cfg.difficulty] || DIFF[1]).score;
+      const timeBonus = Math.round(Math.max(0, game.P.roundSecs - nowSec));
+      const bonus = Math.round((game.level * 60 + 300 * eff + timeBonus) * mul);
       game.score += bonus; game.state = 'cleared'; $score.textContent = game.score;
       showBanner('Level ' + game.level + ' cleared', cssColor(FACTIONS[PLAYER].color),
-        '+' + bonus + ' &nbsp;·&nbsp; held ' + pPct + '%<br><span class="dim">advancing… (Space)</span>');
+        reason + '<br>' + pctLine() + '<br>+' + bonus + ' &nbsp;(×' + mul + ')' +
+        '<br><span class="dim">advancing… (Space)</span>');
       game.level++;
       setTimeout(() => { if (game.state === 'cleared') startLevel(); }, 2600);
     }
-    function loseGame() {
+    function loseGame(reason) {
       game.state = 'over';
       let best = '';
       if (game.score > highScore) {
         highScore = game.score; localStorage.setItem('bloom_high', String(highScore));
-        $best.textContent = highScore; best = '<br><span style="color:#ffd24a">★ New best!</span>';
+        $best.textContent = highScore; best = ' &nbsp;·&nbsp; <span style="color:#ffd24a">★ New best!</span>';
       }
       showBanner('Game over', '#ff7a7a',
-        'Reached level ' + game.level + ' &nbsp;·&nbsp; score ' + game.score + best +
+        reason + '<br>' + pctLine() + '<br>Reached level ' + game.level + ' &nbsp;·&nbsp; score ' + game.score + best +
         '<br><span class="dim">Press R to play again</span>');
     }
     function checkLevel(nowSec) {
       if (game.state !== 'playing' || !game.scored || nowSec < 1.5) return; // wait for a valid score
+      const win = game.P.winPct;
       for (const f of [PLAYER, ...game.activeAIs]) {
-        if (100 * territory[f] / CELLS >= game.P.winPct) { f === PLAYER ? winLevel(nowSec) : loseGame(); return; }
+        if (100 * territory[f] / CELLS >= win) {
+          if (f === PLAYER) winLevel(nowSec, 'You reached ' + win + '% — knockout!');
+          else loseGame(FACTIONS[f].name + ' reached ' + win + '% — knockout');
+          return;
+        }
       }
       if (territory[0] / CELLS < FULL_NEUTRAL || nowSec >= game.P.roundSecs) {
-        bestFaction() === PLAYER ? winLevel(nowSec) : loseGame();
+        const why = nowSec >= game.P.roundSecs ? "Time's up" : 'Field claimed';
+        const bf = bestFaction();
+        if (bf === PLAYER) winLevel(nowSec, why + ' — you held the most');
+        else loseGame(why + ' — ' + FACTIONS[bf].name + ' held the most');
       }
     }
     function updateGameHUD(nowSec) {
@@ -832,6 +887,8 @@
       $time.textContent = game.state === 'playing' ? Math.max(0, game.P.roundSecs - nowSec).toFixed(0) + 's' : '—';
       $level.textContent = game.level;
       $score.textContent = game.score;
+      const d = DIFF[cfg.difficulty] || DIFF[1];
+      $diff.textContent = d.name + ' ×' + d.score;
     }
 
     window.addEventListener('keydown', (e) => {
@@ -874,16 +931,86 @@
       }
     }
     buildSettings();
+    const diffsel = document.getElementById('diffsel'); diffsel.selectedIndex = cfg.difficulty;
+    diffsel.addEventListener('change', () => { cfg.difficulty = diffsel.selectedIndex; });
     const gridsel = document.getElementById('gridsel'); gridsel.value = String(N);
     gridsel.addEventListener('change', () => { const p = new URLSearchParams(location.search); p.set('n', gridsel.value); location.search = p.toString(); });
     document.getElementById('gear').addEventListener('click', () => $settings.classList.toggle('show'));
     document.getElementById('s-close').addEventListener('click', () => $settings.classList.remove('show'));
     document.getElementById('s-restart').addEventListener('click', () => { $settings.classList.remove('show'); newGame(); });
-    document.getElementById('s-defaults').addEventListener('click', () => { Object.assign(cfg, DEFAULTS); buildSettings(); });
+    document.getElementById('s-defaults').addEventListener('click', () => { Object.assign(cfg, DEFAULTS); buildSettings(); diffsel.selectedIndex = cfg.difficulty; });
     const $rules = document.getElementById('rules');
     document.getElementById('help').addEventListener('click', () => $rules.classList.toggle('show'));
     document.getElementById('rules-close').addEventListener('click', () => $rules.classList.remove('show'));
     $rules.addEventListener('click', (e) => { if (e.target === $rules) $rules.classList.remove('show'); });
+    const $tech = document.getElementById('tech');
+    document.getElementById('techbtn').addEventListener('click', () => $tech.classList.toggle('show'));
+    document.getElementById('tech-close').addEventListener('click', () => $tech.classList.remove('show'));
+    $tech.addEventListener('click', (e) => { if (e.target === $tech) $tech.classList.remove('show'); });
+
+    // ---------------------------------------------------------------------------
+    // Ambient audio — procedural spooky/spacey drone (Web Audio API, no files).
+    // Built lazily on first toggle (needs a user gesture to start).
+    // ---------------------------------------------------------------------------
+    let audio = null, audioOn = false;
+    function buildAudio() {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const master = ctx.createGain(); master.gain.value = 0; master.connect(ctx.destination);
+      // feedback delay → spacey echo
+      const echo = ctx.createGain(); echo.gain.value = 0.5; echo.connect(master);
+      const delay = ctx.createDelay(2.0); delay.delayTime.value = 0.5;
+      const fb = ctx.createGain(); fb.gain.value = 0.42;
+      delay.connect(fb); fb.connect(delay); delay.connect(echo);
+      // warm lowpass for the drone
+      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 700; lp.Q.value = 0.7;
+      lp.connect(master); lp.connect(delay);
+      // detuned drone chord (A minor-ish), each voice with a slow tremolo LFO
+      [55, 82.41, 110, 164.81].forEach((f, i) => {
+        const o = ctx.createOscillator(); o.type = i < 2 ? 'sine' : 'triangle';
+        o.frequency.value = f; o.detune.value = (i - 1.5) * 5;
+        const g = ctx.createGain(); g.gain.value = 0.09 / (1 + i * 0.5);
+        o.connect(g); g.connect(lp); o.start();
+        const lfo = ctx.createOscillator(); lfo.frequency.value = 0.022 + i * 0.013;
+        const lg = ctx.createGain(); lg.gain.value = g.gain.value * 0.75;
+        lfo.connect(lg); lg.connect(g.gain); lfo.start();
+      });
+      // slow filter sweep → drifting, breathing texture
+      const fl = ctx.createOscillator(); fl.frequency.value = 0.017;
+      const flg = ctx.createGain(); flg.gain.value = 340; fl.connect(flg); flg.connect(lp.frequency); fl.start();
+      // occasional eerie high shimmer pings
+      let pingT = 0;
+      function ping() {
+        if (!audioOn) return;
+        const o = ctx.createOscillator(); o.type = 'sine';
+        o.frequency.value = [392, 523.25, 587.33, 784, 880][(Math.random() * 5) | 0];
+        const g = ctx.createGain(); g.gain.value = 0;
+        o.connect(g); g.connect(master); g.connect(delay);
+        const t = ctx.currentTime;
+        g.gain.setValueAtTime(0, t);
+        g.gain.linearRampToValueAtTime(0.022, t + 0.8);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 4);
+        o.start(t); o.stop(t + 4.1);
+        pingT = setTimeout(ping, 5000 + Math.random() * 11000);
+      }
+      audio = { ctx, master, ping, stopPings: () => clearTimeout(pingT) };
+    }
+    function toggleAudio() {
+      if (!audio) buildAudio();
+      audioOn = !audioOn;
+      const t = audio.ctx.currentTime;
+      audio.master.gain.cancelScheduledValues(t);
+      audio.master.gain.setValueAtTime(audio.master.gain.value, t);
+      if (audioOn) {
+        audio.ctx.resume();
+        audio.master.gain.linearRampToValueAtTime(0.13, t + 1.6); // subtle
+        audio.ping();
+      } else {
+        audio.master.gain.linearRampToValueAtTime(0, t + 0.7);
+        audio.stopPings();
+      }
+      document.getElementById('sound').classList.toggle('on', audioOn);
+    }
+    document.getElementById('sound').addEventListener('click', toggleAudio);
 
     // ---------------------------------------------------------------------------
     // Loop
