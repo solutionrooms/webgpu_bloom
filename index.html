@@ -797,8 +797,9 @@
         aiRegenMul: (1 + 0.18 * t) * ai,                              // AIs get richer each level / difficulty
         spread: cfg.spread * (1 + 0.08 * t),
         // you start each level with less nutrient — less the higher the level,
-        // and less on harder difficulty
-        startFrac: Math.max(0.3, 1 - 0.08 * t) * ((DIFF[cfg.difficulty] || DIFF[1]).startNut),
+        // and less on harder difficulty. Level 1 now starts where ~level 7 used
+        // to (much tighter opening), tapering to a floor.
+        startFrac: Math.max(0.2, 0.52 - 0.06 * t) * ((DIFF[cfg.difficulty] || DIFF[1]).startNut),
         nutMax: cfg.nutMax, nutRegen: cfg.nutRegen, nutPerTerr: cfg.nutPerTerr,
         seedCost: cfg.seedCost, winPct: cfg.winPct, roundSecs: cfg.roundSecs,
       };
