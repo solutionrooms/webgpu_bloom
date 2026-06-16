@@ -666,6 +666,10 @@
         let sum = 0; for (let k = 0; k < K; k++) sum += totals[k];
         if (Math.abs(sum - CELLS) > 1) return;
         updateScoreUI(totals);
+        lastTiles = arr;                 // coarse map for AI targeting
+        // The level may only be judged once a VALID readback has landed for it,
+        // and the timer starts from that moment — immune to slow page-load timing.
+        if (!game.scored) { game.scored = true; game.tStart = performance.now(); }
       }).catch(() => { scorePending = false; });
     }
 
@@ -695,18 +699,21 @@
     // seed is a choice; the AI has its own economy; territory spreads slowly.
     const DEFAULTS = {
       nutMax: 110, nutRegen: 9, nutPerTerr: 16, seedCost: 24,  // your economy
-      aiInterval: 2.6, aiSeedCost: 38,                         // AI economy (levels ramp these up)
-      winPct: 60, roundSecs: 60, spread: 14,                   // match (spread = cells/sec)
+      aiInterval: 2.8, aiSeedCost: 40,                         // AI economy (levels ramp these up)
+      winPct: 75, roundSecs: 50, spread: 9,                    // match (spread = cells/sec)
     };
     const cfg = { ...DEFAULTS };
 
-    // Per-level difficulty ramp derived from cfg.
+    // Per-level difficulty ramp derived from cfg. Higher levels: more, faster,
+    // cheaper, richer AI + slightly faster spread.
     function levelParams(L) {
+      const t = L - 1;
       return {
-        aiCount: Math.min(AIS.length, 1 + Math.floor((L - 1) / 2)),  // 1,1,2,2,…
-        aiInterval: Math.max(0.5, cfg.aiInterval * Math.pow(0.9, L - 1)),
-        aiSeedCost: Math.max(8, cfg.aiSeedCost - (L - 1) * 2),
-        spread: cfg.spread * (1 + 0.07 * (L - 1)),
+        aiCount: Math.min(AIS.length, 1 + Math.floor(t / 2)),         // 1,1,2,2,…
+        aiInterval: Math.max(0.45, cfg.aiInterval * Math.pow(0.85, t)),
+        aiSeedCost: Math.max(8, cfg.aiSeedCost - 3 * t),
+        aiRegenMul: 1 + 0.18 * t,                                     // AIs get richer each level
+        spread: cfg.spread * (1 + 0.08 * t),
         nutMax: cfg.nutMax, nutRegen: cfg.nutRegen, nutPerTerr: cfg.nutPerTerr,
         seedCost: cfg.seedCost, winPct: cfg.winPct, roundSecs: cfg.roundSecs,
       };
@@ -715,7 +722,7 @@
     let highScore = parseInt(localStorage.getItem('bloom_high') || '0', 10) || 0;
     const game = {
       state: 'playing',          // 'playing' | 'cleared' | 'over'
-      level: 1, score: 0, winner: 0, tStart: 0, claimAcc: 0,
+      level: 1, score: 0, winner: 0, tStart: 0, claimAcc: 0, scored: false,
       P: levelParams(1), activeAIs: [AIS[0]], aiNext: [],
     };
     const nut = new Float32Array(K);  // nutrient per faction (index 0 unused)
@@ -753,7 +760,7 @@
       territory.fill(0); territory[0] = CELLS;   // assume all-neutral until first readback
       scoreGen++;                                // invalidate any in-flight readback
       nut.fill(P.nutMax);
-      game.state = 'playing'; game.winner = 0; game.claimAcc = 0;
+      game.state = 'playing'; game.winner = 0; game.claimAcc = 0; game.scored = false;
       game.tStart = performance.now();
       game.aiNext = game.activeAIs.map((_, k) => P.aiInterval * (0.4 + 0.4 * k));
       $banner.classList.remove('show');
@@ -811,7 +818,7 @@
         '<br><span class="dim">Press R to play again</span>');
     }
     function checkLevel(nowSec) {
-      if (game.state !== 'playing' || nowSec < 2.0) return;
+      if (game.state !== 'playing' || !game.scored || nowSec < 1.5) return; // wait for a valid score
       for (const f of [PLAYER, ...game.activeAIs]) {
         if (100 * territory[f] / CELLS >= game.P.winPct) { f === PLAYER ? winLevel(nowSec) : loseGame(); return; }
       }
@@ -887,11 +894,17 @@
       const nowSec = (now - game.tStart) / 1000;
 
       const P = game.P;
-      if (game.state === 'playing') {
-        // nutrient regen ∝ territory, for every active faction
+      // Gameplay (spread, economy, AI, seeding) waits for the first valid score
+      // readback — so a slow page-load warmup can't run the round before it's
+      // visible/interactive. RD still churns the starters during warmup.
+      const live = game.state === 'playing' && game.scored;
+      if (live) {
+        // nutrient regen ∝ territory, for every active faction (AIs get richer
+        // each level via aiRegenMul → the ramp)
         for (const f of [PLAYER, ...game.activeAIs]) {
           const frac = (territory[f] || 0) / CELLS;
-          nut[f] = Math.min(P.nutMax, nut[f] + (P.nutRegen + P.nutPerTerr * frac) * dt);
+          const mul = f === PLAYER ? 1 : P.aiRegenMul;
+          nut[f] = Math.min(P.nutMax, nut[f] + (P.nutRegen + P.nutPerTerr * frac) * mul * dt);
         }
 
         // AI seeding (save/restore the player's brush around AI stamps)
@@ -911,15 +924,15 @@
       pendingSeed = false;
 
       // RD: 2 steps every frame (smooth, even → ends in bufA). Territory only
-      // advances on claim-steps, metered to ≈ spread cells/sec — slow & strategic.
+      // advances on "claim frames", metered to ≈ spread cells/sec — slow &
+      // strategic. uClaim is set ONCE per frame so both steps read the same
+      // value (toggling it between the two compute calls is not reliable).
       const STEPS = 2;
-      game.claimAcc += (game.state === 'playing' ? P.spread : 0) * dt;
-      let claims = Math.floor(game.claimAcc); if (claims > STEPS) claims = STEPS;
-      game.claimAcc -= claims;
-      for (let s = 0; s < STEPS; s++) {
-        uClaim.value = (s < claims) ? 1 : 0;
-        renderer.compute((s & 1) === 0 ? stepAB : stepBA);
-      }
+      game.claimAcc += (live ? P.spread : 0) * dt;
+      const claimFrame = game.claimAcc >= STEPS;
+      if (claimFrame) game.claimAcc -= STEPS;
+      uClaim.value = claimFrame ? 1 : 0;
+      for (let s = 0; s < STEPS; s++) renderer.compute((s & 1) === 0 ? stepAB : stepBA);
 
       renderer.render(scene, camera);
       maybeScore(now);
