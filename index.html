@@ -892,7 +892,14 @@
       P: levelParams(1), activeAIs: [AIS[0]], aiControlled: [AIS[0]], aiNext: [],
       pvp: false, pvpActive: [2], pvpAI: [], netMsg: '',
       dry: {},                   // per-faction "out of nutrient" latch (hysteresis)
+      tick: 0,                   // deterministic sim tick counter
     };
+
+    // --- deterministic simulation clock (the basis for 2-player lockstep) ---
+    const TICK_HZ = 30, TICK_DT = 1 / TICK_HZ;   // fixed sim timestep
+    const STEPS_PER_TICK = 8;                    // RD steps per tick (even → ends in bufA)
+    const READBACK_TICKS = 6;                    // tick-synced score readback cadence
+    let myFaction = PLAYER;                      // faction the local player drives (host=1, guest=2)
     const nut = new Float32Array(K);  // nutrient per faction (index 0 unused)
     const aiSeeds = [];
     let lastFrame = performance.now();
@@ -931,8 +938,14 @@
       scoreGen++;                                // invalidate any in-flight readback
       nut.fill(P.nutMax); nut[PLAYER] = P.nutMax * P.startFrac;  // you start each level with less
       game.state = 'playing'; game.winner = 0; game.claimAcc = 0; game.scored = false; game.dry = {};
-      game.tStart = performance.now();
-      game.aiNext = game.activeAIs.map((_, k) => P.aiInterval * (0.4 + 0.4 * k));
+      game.tick = 0; tickAcc = 0;
+      game.aiNext = game.activeAIs.map((_, k) => Math.max(1, Math.round(P.aiInterval * TICK_HZ * (0.4 + 0.4 * k))));
+      // lockstep input buffers: clear, then pre-fill the first DELAY ticks with
+      // "no input" so both peers can run ticks 0..DELAY-1 before any input lands.
+      net.localIn.clear(); net.remoteIn.clear();
+      for (let t = 0; t < net.delay; t++) { net.localIn.set(t, null); net.remoteIn.set(t, null); }
+      seedRng(net.matchSeed || 0x1234567);
+      scorePending = false; scoreData = null;     // drop any in-flight readback from the last match
       $banner.classList.remove('show');
     }
     function newGame() { game.level = 1; game.score = 0; startLevel(); }
@@ -948,27 +961,37 @@
       return !game.dry[f] && nut[f] >= cost;
     }
 
+    // deterministic PRNG (mulberry32). Seeded identically on both peers so the
+    // AI plays the SAME game in lockstep (Math.random would desync them).
+    let rngState = 1;
+    function seedRng(s) { rngState = (s | 0) || 1; }
+    function rng() {
+      rngState = (rngState + 0x6D2B79F5) | 0;
+      let t = Math.imul(rngState ^ (rngState >>> 15), 1 | rngState);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    }
     function aiPickTarget() {  // seed neutral ground, biased toward the CENTRE so
       const cC = N * 0.5;       // the AI actively contests the valuable middle
-      if (!lastTiles) return { cx: (cC + (Math.random() * N * 0.4 - N * 0.2)) | 0, cy: (cC + (Math.random() * N * 0.4 - N * 0.2)) | 0 };
+      if (!lastTiles) return { cx: (cC + (rng() * N * 0.4 - N * 0.2)) | 0, cy: (cC + (rng() * N * 0.4 - N * 0.2)) | 0 };
       let bestScore = -1e9, bx = cC, by = cC;
       for (let s = 0; s < 90; s++) {
-        const t = (Math.random() * TILES) | 0;
+        const t = (rng() * TILES) | 0;
         const c0 = t * SPAN + (SPAN >> 1);
         const tx = c0 % N, ty = (c0 / N) | 0;
         const dist = Math.hypot(tx - cC, ty - cC);
         const score = lastTiles[t * K] - dist * 0.5;   // high neutral + central
         if (score > bestScore) { bestScore = score; bx = tx; by = ty; }
       }
-      const jx = ((Math.random() * 30) | 0) - 15, jy = ((Math.random() * 30) | 0) - 15;
+      const jx = ((rng() * 30) | 0) - 15, jy = ((rng() * 30) | 0) - 15;
       return { cx: (bx + jx + N) % N, cy: (by + jy + N) % N };
     }
-    function aiTick(nowSec) {
+    function aiTick(tick) {           // tick-scheduled so it is deterministic
       const P = game.P;
       game.activeAIs.forEach((fac, k) => {
         if (!game.aiControlled.includes(fac)) return;   // guest-controlled factions aren't AI'd
-        if (nowSec >= game.aiNext[k] && nut[fac] >= P.aiSeedCost) {
-          game.aiNext[k] = nowSec + P.aiInterval;
+        if (tick >= game.aiNext[k] && nut[fac] >= P.aiSeedCost) {
+          game.aiNext[k] = tick + Math.max(1, Math.round(P.aiInterval * TICK_HZ));
           nut[fac] -= P.aiSeedCost;
           const t = aiPickTarget();
           aiSeeds.push({ cx: t.cx, cy: t.cy, r: BR[2], owner: fac });  // big aggressive claim
@@ -1018,8 +1041,10 @@
         reason + '<br>' + pctLine() + '<br>Reached level ' + game.level + ' &nbsp;·&nbsp; score ' + game.score + best +
         '<br><span class="dim">Press R to play again</span>');
     }
-    function checkLevel(nowSec) {
-      if (game.state !== 'playing' || !game.scored || nowSec < 1.5) return; // wait for a valid score
+    function checkLevel() {
+      if (game.state !== 'playing' || !game.scored) return;
+      const nowSec = game.tick / TICK_HZ;
+      if (nowSec < 1.5) return;                 // short grace once the round starts
       if (game.pvp) {  // 2-player: single match, winner = faction with most territory
         for (const f of [PLAYER, ...game.activeAIs]) if (100 * territory[f] / CELLS >= game.P.winPct) return pvpEnd(f);
         if (territory[0] / CELLS < FULL_NEUTRAL || nowSec >= game.P.roundSecs) return pvpEnd(bestFaction());
@@ -1041,19 +1066,30 @@
       }
     }
     function updateGameHUD(nowSec) {
-      $nut.textContent = Math.round(nut[PLAYER]);
-      $nutfill.style.width = (100 * nut[PLAYER] / game.P.nutMax) + '%';
+      const me = net.mode === 'solo' ? PLAYER : myFaction;   // your faction's nutrient
+      $nut.textContent = Math.round(nut[me] || 0);
+      $nutfill.style.width = (100 * (nut[me] || 0) / game.P.nutMax) + '%';
       $time.textContent = game.state === 'playing' ? Math.max(0, game.P.roundSecs - nowSec).toFixed(0) + 's' : '—';
-      $level.textContent = game.level;
-      $score.textContent = game.score;
-      const d = DIFF[cfg.difficulty] || DIFF[1];
-      $diff.textContent = d.name + ' ×' + d.score;
+      if (net.mode === 'solo') {
+        $level.textContent = game.level; $score.textContent = game.score;
+        const d = DIFF[cfg.difficulty] || DIFF[1];
+        $diff.textContent = d.name + ' ×' + d.score;   // netHud() overrides this label in 2-player
+      } else {
+        $level.textContent = '2P'; $score.textContent = '';
+      }
       uLight.value = cfg.light / 100;   // apply 3D-lighting setting
     }
 
     window.addEventListener('keydown', (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
-      if (e.key === 'r' || e.key === 'R') { if (net.mode !== 'guest') newGame(); }   // host/solo restart
+      if (e.key === 'r' || e.key === 'R') {                       // restart / rematch
+        if (net.mode === 'solo') newGame();
+        else if (net.mode === 'host') {                          // host re-handshakes a fresh match
+          const seed = (Date.now() & 0x7fffffff) || 1;
+          try { net.conn.send({ t: 'start', seed, ai: net.withAI }); } catch (er) {}
+          pvpSetup(true, seed, net.withAI);
+        }                                                         // guest: waits for host's 'start'
+      }
       else if ((e.key === ' ' || e.key === 'Enter') && game.state === 'cleared') startLevel();
       else if (e.key === 'p' || e.key === 'P') { perf.on = !perf.on; $perf.classList.toggle('show', perf.on); if (!perf.on) $perf.innerHTML = ''; }
     });
@@ -1177,148 +1213,77 @@
     document.getElementById('sound').addEventListener('click', toggleAudio);
 
     // ===========================================================================
-    // 2-PLAYER (peer-to-peer via PeerJS, host-authoritative). Host runs the one
-    // true sim (P1 = Coral); the guest (P2 = Bloom) sends seed inputs and paints
-    // a compact ownership map the host streams over the data channel. Optional
-    // AI = Spore. (Canvas video-capture isn't reliable on the WebGPU canvas — it
-    // yields a live but frame-less track — so we ship the map, not pixels.)
+    // 2-PLAYER — deterministic LOCKSTEP (PeerJS data channel). Each peer runs the
+    // full sim on its own GPU; we transmit ONLY per-tick inputs (a seed cell, or
+    // null) with a short input-delay buffer. The sim is integer fixed-point and
+    // tick-driven, so both peers compute bit-identical state — no field/video is
+    // ever streamed. Host = Coral (faction 1), guest = Bloom (faction 2), and an
+    // optional AI = Spore (faction 3) runs identically on both via a shared seed.
     // ===========================================================================
-    const net = { mode: 'solo', peer: null, conn: null, withAI: false, lastBcast: 0,
-                  guestSeed: null, guestDown: false, lastState: null, shownOver: false,
-                  lastMap: null, gcanvas: null, gctx: null, lastMapSent: 0, mapPending: false };
+    const net = { mode: 'solo', peer: null, conn: null, withAI: false, delay: 0,
+                  localIn: new Map(), remoteIn: new Map(), matchSeed: 0,
+                  desync: false, sumLocal: new Map() };
     const $lobby = document.getElementById('lobby');
     const $lstat = document.getElementById('lobby-status');
     const setLStat = (h) => { $lstat.innerHTML = h; };
-    // gamma-matched byte colours per faction (same sqrt as the display's cssColor)
-    const MAP_PAL = FACTIONS.map(f => f.color.map(v => Math.round(Math.min(1, Math.sqrt(v)) * 255)));
 
     async function loadPeer() {
       const m = await import('https://esm.sh/peerjs@1.5.5');
       return m.default || m.Peer || m;
     }
 
-    // set uBrush from a normalised host-screen position (u, vTop) for `owner`
-    function brushSetUV(u, vTop, owner) {
-      const px = (u - 0.5) * uScale.value.x;
-      const py = (1 - vTop - 0.5) * uScale.value.y;
-      if (Math.abs(px) > 0.5 || Math.abs(py) > 0.5) return false;
-      uBrush.value.x = Math.max(0, Math.min(N - 1, Math.floor((px + 0.5) * N)));
-      uBrush.value.y = Math.max(0, Math.min(N - 1, Math.floor((py + 0.5) * N)));
-      uBrush.value.z = BR[1]; uBrush.value.w = owner;
-      return true;
-    }
-
-    function pvpSetup() {
+    // Start (or restart) a 2-player match. isHost → Coral(1); guest → Bloom(2).
+    function pvpSetup(isHost, seed, withAI) {
+      net.withAI = withAI; net.delay = 3; net.matchSeed = seed; net.desync = false;
+      net.sumLocal.clear();
+      myFaction = isHost ? 1 : 2;
       game.pvp = true;
-      game.pvpActive = net.withAI ? [2, 3] : [2];  // factions besides host(1)
-      game.pvpAI = net.withAI ? [3] : [];           // AI-driven subset
-      net.shownOver = false;
-      startLevel();
+      game.pvpActive = withAI ? [2, 3] : [2];  // non-host factions present
+      game.pvpAI = withAI ? [3] : [];          // AI-driven subset (Spore)
+      startLevel();                            // resets tick=0, seeds RNG, prefills buffers
     }
     function pvpEnd(winner) {
       game.state = 'over'; game.winner = winner;
-      const nm = winner === PLAYER ? 'You (Coral)' : winner === 2 ? 'Player 2 (Bloom)' : FACTIONS[winner].name;
-      game.netMsg = '<b style="color:' + cssColor(FACTIONS[winner].color) + '">' + nm + ' wins</b><br>' + pctLine();
-      showBanner(nm + ' wins', cssColor(FACTIONS[winner].color), pctLine() + '<br><span class="dim">Press R to rematch</span>');
+      const isYou = winner === myFaction, isHuman = winner === 1 || winner === 2;
+      const title = isYou ? 'You win' : isHuman ? 'Opponent wins' : FACTIONS[winner].name + ' wins';
+      showBanner(title, cssColor(FACTIONS[winner].color), pctLine() + '<br><span class="dim">Press R to rematch</span>');
     }
 
-    function broadcastState(now) {
-      if (net.mode !== 'host' || !net.conn || !net.conn.open || now - net.lastBcast < 100) return;
-      net.lastBcast = now;
-      try {
-        net.conn.send({ t: 'state', terr: territory.map(x => +(100 * x / CELLS).toFixed(1)),  // percentages
-          nut2: Math.round(nut[2] || 0), nutMax: game.P.nutMax, state: game.state, winner: game.winner | 0,
-          timeLeft: Math.max(0, game.P.roundSecs - (now - game.tStart) / 1000), msg: game.netMsg || '' });
-      } catch (e) {}
-    }
-    function guestHud() {  // guest renders HUD from the host's broadcast
-      const s = net.lastState; if (!s) return;
-      for (let k = 1; k < K && k < s.terr.length; k++) if (scoreBars[k]) {
-        const pct = s.terr[k] || 0;   // already a percentage
-        scoreBars[k].fill.style.width = pct.toFixed(1) + '%'; scoreBars[k].pct.textContent = Math.round(pct) + '%';
-      }
-      $nut.textContent = Math.round(s.nut2); $nutfill.style.width = (100 * s.nut2 / (s.nutMax || 100)) + '%';
-      $time.textContent = s.state === 'playing' ? Math.max(0, s.timeLeft).toFixed(0) + 's' : '—';
-      $level.textContent = '2P'; $score.textContent = ''; $diff.textContent = 'You: Bloom';
-      uLight.value = cfg.light / 100;
-      if (s.state === 'over' && !net.shownOver) { net.shownOver = true; showBanner('Match over', '#cfe3ff', s.msg + '<br><span class="dim">waiting for host…</span>'); }
-      if (s.state === 'playing' && net.shownOver) { net.shownOver = false; $banner.classList.remove('show'); }
+    function netHud() {
+      // subtle "waiting for the other player" indicator when lockstep stalls
+      const stalled = game.state === 'playing' && game.scored && !net.remoteIn.has(game.tick) && (net.conn && net.conn.open);
+      $diff.textContent = net.desync ? '⚠ desync' : stalled ? 'waiting for opponent…' : 'You: ' + FACTIONS[myFaction].name;
+      $diff.style.color = net.desync ? '#ff8080' : stalled ? '#ffcf6b' : '#cfe3ff';
     }
 
-    // Host: read the ownership map back (throttled) and ship it as bytes.
-    function maybeSendMap(now) {
-      if (net.mode !== 'host' || !net.conn || !net.conn.open) return;
-      if (net.mapPending || now - net.lastMapSent < 160) return;   // ~6/s
-      net.lastMapSent = now; net.mapPending = true;
-      renderer.compute(mapFromA);
-      renderer.getArrayBufferAsync(mapBuf).then((ab) => {
-        net.mapPending = false;
-        const f = new Float32Array(ab), bytes = new Uint8Array(MAPN);
-        for (let i = 0; i < MAPN; i++) { const o = f[i] | 0; bytes[i] = o < 0 ? 0 : o > 3 ? 0 : o; }
-        try { net.conn.send(bytes); } catch (e) {}
-      }).catch(() => { net.mapPending = false; });
-    }
-
-    // Guest: paint the latest ownership map onto its own 2D canvas (smoothed
-    // upscale of the low-res grid, in the same centred-square layout as the host;
-    // y is flipped to match the field's bottom-up orientation).
-    let gimg = null, goff = null, goctx = null;
-    function drawGuestMap() {
-      const bytes = net.lastMap; if (!bytes || !net.gctx) return;
-      const d = gimg.data;
-      for (let i = 0; i < MAPN; i++) { const p = MAP_PAL[bytes[i]] || MAP_PAL[0], o = i * 4;
-        d[o] = p[0]; d[o + 1] = p[1]; d[o + 2] = p[2]; d[o + 3] = 255; }
-      goctx.putImageData(gimg, 0, 0);
-      const c = net.gcanvas, g = net.gctx, W = c.width, H = c.height, sq = Math.min(W, H);
-      const x0 = (W - sq) / 2, y0 = (H - sq) / 2;
-      g.fillStyle = '#0a0e16'; g.fillRect(0, 0, W, H);
-      g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
-      g.save(); g.translate(x0, y0 + sq); g.scale(1, -1);
-      g.drawImage(goff, 0, 0, MAPW, MAPH, 0, 0, sq, sq); g.restore();
-      net.gfield = { x0, y0, sq };
-    }
-    function ensureGuestCanvas() {
-      if (net.gcanvas) { net.gcanvas.style.display = 'block'; return; }
-      const c = document.createElement('canvas'); c.id = 'guestcanvas';
-      c.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;background:#0a0e16;z-index:5;touch-action:none;cursor:crosshair';
-      document.body.appendChild(c);
-      net.gcanvas = c; net.gctx = c.getContext('2d');
-      goff = document.createElement('canvas'); goff.width = MAPW; goff.height = MAPH;
-      goctx = goff.getContext('2d'); gimg = goctx.createImageData(MAPW, MAPH);
-      const send = (e) => {
-        const f = net.gfield; if (!f) return;
-        const u = (e.clientX - f.x0) / f.sq, v = (e.clientY - f.y0) / f.sq;
-        if (u < 0 || u > 1 || v < 0 || v > 1) return;
-        try { net.conn.send({ t: 'seed', u, v, down: true }); } catch (er) {}
-      };
-      c.addEventListener('pointerdown', (e) => { net.gdown = true; c.setPointerCapture(e.pointerId); send(e); });
-      c.addEventListener('pointermove', (e) => { if (net.gdown) send(e); });
-      const up = () => { net.gdown = false; try { net.conn.send({ t: 'seed', down: false }); } catch (e) {} };
-      c.addEventListener('pointerup', up); c.addEventListener('pointercancel', up);
-      const fit = () => { c.width = window.innerWidth; c.height = window.innerHeight; drawGuestMap(); };
-      window.addEventListener('resize', fit); fit();
-    }
-    function enterGuest() {
-      document.getElementById('app').style.display = 'none';
-      document.getElementById('hint').classList.add('hide');
-      ensureGuestCanvas();
-    }
     function endNet(msg) {
-      net.mode = 'solo'; game.pvp = false;
+      net.mode = 'solo'; game.pvp = false; net.delay = 0; net.desync = false;
+      net.localIn.clear(); net.remoteIn.clear(); net.sumLocal.clear();
+      myFaction = PLAYER;
       try { net.conn && net.conn.close(); } catch (e) {}
       try { net.peer && net.peer.destroy(); } catch (e) {}
-      net.peer = net.conn = null; net.guestDown = false; net.lastMap = null;
-      if (net.gcanvas) net.gcanvas.style.display = 'none';
-      document.getElementById('app').style.display = '';
-      $score.textContent = '0';
+      net.peer = net.conn = null;
+      $diff.style.color = '#cfe3ff';
       if (msg) { $lobby.classList.add('show'); setLStat(msg); }
       newGame();
+    }
+
+    // shared message handler for both sides of the data channel
+    function onNetData(d) {
+      if (!d || typeof d !== 'object') return;
+      if (d.t === 'in') { net.remoteIn.set(d.tick, d.in || null); return; }   // peer's input for a tick
+      if (d.t === 'sum') { checkRemoteSum(d.tick, d.sum); return; }            // desync checksum
+      if (d.t === 'start') {                                                    // guest: begin the match
+        net.mode = 'guest'; $lobby.classList.remove('show');
+        document.getElementById('hint').classList.add('hide');
+        pvpSetup(false, d.seed, !!d.ai);
+      }
     }
 
     async function hostGame() {
       try {
         const Peer = await loadPeer();
-        net.withAI = document.getElementById('lobby-ai').checked;
+        const withAI = document.getElementById('lobby-ai').checked;
         setLStat('Starting…');
         net.peer = new Peer();
         net.peer.on('open', (id) => {
@@ -1331,10 +1296,12 @@
           net.conn = conn;
           conn.on('open', () => {
             net.mode = 'host';
+            const seed = (Date.now() & 0x7fffffff) || 1;     // shared RNG seed (sent to guest)
+            try { conn.send({ t: 'start', seed, ai: withAI }); } catch (e) {}
             $lobby.classList.remove('show');
-            pvpSetup();
+            pvpSetup(true, seed, withAI);
           });
-          conn.on('data', (d) => { if (d && d.t === 'seed') { if ('u' in d) net.guestSeed = { u: d.u, v: d.v }; net.guestDown = !!d.down; } });
+          conn.on('data', onNetData);
           conn.on('close', () => endNet('Player 2 disconnected'));
         });
       } catch (e) { setLStat('Networking failed to load: ' + e.message); }
@@ -1349,20 +1316,42 @@
         net.peer.on('open', () => {
           const conn = net.peer.connect(code, { reliable: true });
           net.conn = conn;
-          conn.on('open', () => { net.mode = 'guest'; enterGuest(); $lobby.classList.remove('show'); });
-          conn.on('data', (d) => {
-            if (d && d.t === 'state') { net.lastState = d; guestHud(); return; }
-            let bytes = null;
-            if (d instanceof ArrayBuffer) bytes = new Uint8Array(d);
-            else if (ArrayBuffer.isView(d)) bytes = new Uint8Array(d.buffer, d.byteOffset, d.byteLength);
-            if (bytes && bytes.length >= MAPN) { net.lastMap = bytes; drawGuestMap(); }
-          });
+          conn.on('open', () => setLStat('Connected — waiting for host to start…'));
+          conn.on('data', onNetData);
           conn.on('close', () => endNet('Host disconnected'));
           conn.on('error', (e) => setLStat('Error: ' + (e.type || e.message)));
           setTimeout(() => { if (net.mode !== 'guest') setLStat('No response — double-check the code.'); }, 9000);
         });
         net.peer.on('error', (e) => setLStat('Error: ' + (e.type || e.message)));
       } catch (e) { setLStat('Networking failed to load: ' + e.message); }
+    }
+
+    // --- desync detection: hash the synced per-tile ownership map + territory
+    // (identical on both peers iff their fields match) and exchange it per tick.
+    function fieldChecksum() {
+      let h = 2166136261 | 0;
+      if (lastTiles) for (let i = 0; i < lastTiles.length; i++) h = Math.imul(h ^ (lastTiles[i] | 0), 16777619);
+      for (let k = 0; k < K; k++) h = Math.imul(h ^ (territory[k] | 0), 16777619);
+      return h | 0;
+    }
+    function compareSum(tick, remote) {
+      if (net.sumLocal.get(tick) !== remote && !net.desync) {
+        net.desync = true;
+        console.warn('[bloom] DESYNC at tick', tick, 'local', net.sumLocal.get(tick), 'remote', remote);
+      }
+    }
+    function maybeChecksum() {
+      if (net.mode === 'solo' || !net.conn || !net.conn.open || !game.scored) return;
+      const T = game.tick, s = fieldChecksum();
+      net.sumLocal.set(T, s);
+      try { net.conn.send({ t: 'sum', tick: T, sum: s }); } catch (e) {}
+      if (net.sumRemote && net.sumRemote.has(T)) { compareSum(T, net.sumRemote.get(T)); net.sumRemote.delete(T); }
+      if (net.sumLocal.size > 80) for (const k of net.sumLocal.keys()) { if (k < T - 600) net.sumLocal.delete(k); }
+    }
+    function checkRemoteSum(tick, sum) {
+      if (net.sumLocal.has(tick)) compareSum(tick, sum);
+      else { (net.sumRemote || (net.sumRemote = new Map())).set(tick, sum);
+        if (net.sumRemote.size > 80) for (const k of net.sumRemote.keys()) { if (k < tick - 600) net.sumRemote.delete(k); } }
     }
 
     document.getElementById('mpbtn').addEventListener('click', () => { $lobby.classList.add('show'); setLStat(''); });
@@ -1376,81 +1365,119 @@
     // ---------------------------------------------------------------------------
     // Loop
     // ---------------------------------------------------------------------------
-    function animate() {
-      const now = performance.now();
-      if (net.mode === 'guest') { guestHud(); return; }   // guest watches host's video
-      const rawDt = (now - lastFrame) / 1000;
-      const dt = Math.min(0.05, rawDt); lastFrame = now;
-      const nowSec = (now - game.tStart) / 1000;
+    // What the local player is seeding THIS tick (null = nothing). In 2-player
+    // the owner is forced to your own faction; solo lets the faction picker choose.
+    function sampleLocalInput() {
+      const active = uBrushActive.value > 0.5 || pendingSeed;
+      pendingSeed = false;
+      if (!active) return null;
+      const owner = net.mode === 'solo' ? Math.round(uBrush.value.w) : myFaction;
+      return { x: Math.round(uBrush.value.x), y: Math.round(uBrush.value.y), r: uBrush.value.z, o: owner };
+    }
+    function stampSeed(x, y, r, o) {       // raw stamp (no nutrient logic — AI/init)
+      const pb = uBrush.value.clone();
+      uBrush.value.set(x, y, r, o); renderer.compute(seedA); uBrush.value.copy(pb);
+    }
+    function applyInput(inp) {             // human seed: nutrient-gated stamp
+      if (!inp) return;
+      const cost = game.P.seedCost * (inp.r * inp.r) / (BR[1] * BR[1]) * TICK_DT;
+      if (canSeed(inp.o, cost)) { stampSeed(inp.x, inp.y, inp.r, inp.o); nut[inp.o] -= cost; }
+    }
 
-      const P = game.P;
-      // Gameplay (spread, economy, AI, seeding) waits for the first valid score
-      // readback — so a slow page-load warmup can't run the round before it's
-      // visible/interactive. RD still churns the starters during warmup.
-      const live = game.state === 'playing' && game.scored;
+    // One deterministic simulation tick (identical on every peer given identical
+    // inputs → safe to run independently on each machine and only sync inputs).
+    function runTick() {
+      const T = game.tick, P = game.P;
+      // schedule the local input DELAY ticks ahead and ship it to the peer
+      const li = sampleLocalInput();
+      net.localIn.set(T + net.delay, li);
+      if (net.mode !== 'solo' && net.conn && net.conn.open) {
+        try { net.conn.send({ t: 'in', tick: T + net.delay, in: li }); } catch (e) {}
+      }
+      const live = game.scored;
       if (live) {
-        // nutrient regen ∝ territory. Only AI-controlled factions get the
-        // aiRegenMul ramp; humans (the player AND a 2-player guest) regen at the
-        // base rate so PvP is fair.
+        // apply this tick's seeds in a FIXED order: local faction, then remote
+        applyInput(net.localIn.get(T));
+        if (net.mode !== 'solo') applyInput(net.remoteIn.get(T));
+        // nutrient regen ∝ territory; only AI-controlled factions get the ramp
         for (const f of [PLAYER, ...game.activeAIs]) {
           const frac = (territory[f] || 0) / CELLS;
           const mul = game.aiControlled.includes(f) ? P.aiRegenMul : 1;
-          nut[f] = Math.min(P.nutMax, nut[f] + (P.nutRegen + P.nutPerTerr * frac) * mul * dt);
+          nut[f] = Math.min(P.nutMax, nut[f] + (P.nutRegen + P.nutPerTerr * frac) * mul * TICK_DT);
         }
-
-        // AI seeding (save/restore the player's brush around AI stamps)
-        aiTick(nowSec);
-        if (aiSeeds.length) {
-          const pb = uBrush.value.clone();
-          for (const s of aiSeeds) { uBrush.value.set(s.cx, s.cy, s.r, s.owner); renderer.compute(seedA); }
-          aiSeeds.length = 0;
-          uBrush.value.copy(pb);
-        }
-
-        // player seeding — gated by nutrient (cost ∝ brush area)
-        const wantSeed = (uBrushActive.value > 0.5 || pendingSeed) && Math.round(uBrush.value.w) === PLAYER;
-        const cost = P.seedCost * (uBrush.value.z * uBrush.value.z) / (BR[1] * BR[1]) * dt;
-        if (wantSeed && canSeed(PLAYER, cost)) { renderer.compute(seedA); nut[PLAYER] -= cost; }
-
-        // host applies the guest's seeds as Bloom (faction 2), gated by nut[2]
-        if (net.mode === 'host' && net.guestDown && net.guestSeed) {
-          const pb = uBrush.value.clone();
-          if (brushSetUV(net.guestSeed.u, net.guestSeed.v, 2)) {
-            const gc = P.seedCost * dt;
-            if (canSeed(2, gc)) { renderer.compute(seedA); nut[2] -= gc; }
-          }
-          uBrush.value.copy(pb);
-        }
+        // deterministic AI (seeded PRNG, tick schedule); its seeds bypass the
+        // nutrient gate (it already paid aiSeedCost in aiTick)
+        aiTick(T);
+        for (const s of aiSeeds) stampSeed(s.cx, s.cy, s.r, s.owner);
+        aiSeeds.length = 0;
       }
-      pendingSeed = false;
-
-      // RD: several steps per frame (even → ends in bufA) so the chemistry is
-      // lively and forms worm/spot texture. Territory claim is metered PER STEP
-      // to ≈ spread cells/sec, so the strategic spread stays slow & smooth and
-      // is decoupled from the RD speed.
-      let STEPS = cfg.speed | 0; if (STEPS < 2) STEPS = 2; if (STEPS & 1) STEPS++; // even RD steps/frame
-      // Per-step uClaim toggling is unreliable, so gate the whole frame: on a
-      // claim-frame all STEPS steps spread, metered to ≈ spread cells/sec.
-      game.claimAcc += (live ? P.spread : 0) * dt;
-      const claimFrame = game.claimAcc >= STEPS;
-      if (claimFrame) game.claimAcc -= STEPS;
+      // RD steps + claim metering (fixed per tick → deterministic)
+      game.claimAcc += (live ? P.spread : 0) * TICK_DT;
+      const claimFrame = game.claimAcc >= STEPS_PER_TICK;
+      if (claimFrame) game.claimAcc -= STEPS_PER_TICK;
       uClaim.value = claimFrame ? 1 : 0;
-      for (let s = 0; s < STEPS; s++) renderer.compute((s & 1) === 0 ? stepAB : stepBA);
+      for (let s = 0; s < STEPS_PER_TICK; s++) renderer.compute((s & 1) === 0 ? stepAB : stepBA);
+
+      net.localIn.delete(T); net.remoteIn.delete(T);
+      game.tick = T + 1;
+      // Non-blocking tick-synced readback: apply the PREVIOUS cycle's result
+      // (resolved by now) and issue this cycle's. Both happen at a deterministic
+      // tick on both peers → economy / AI / win stay in sync, while the GPU read
+      // completes in the background instead of stalling the sim.
+      if (game.tick % READBACK_TICKS === 0) { applyReadback(); issueReadback(); maybeChecksum(); checkLevel(); }
+    }
+
+    let scoreData = null;
+    function issueReadback() {
+      scorePending = true;
+      renderer.compute(scoreFromA);
+      renderer.getArrayBufferAsync(scoreBuf)
+        .then((ab) => { scoreData = new Float32Array(ab); scorePending = false; })
+        .catch(() => { scorePending = false; });
+    }
+    function applyReadback() {
+      const arr = scoreData; if (!arr) return;
+      const totals = new Array(K).fill(0);
+      for (let t = 0; t < TILES; t++) for (let k = 0; k < K; k++) totals[k] += arr[t * K + k];
+      let sum = 0; for (let k = 0; k < K; k++) sum += totals[k];
+      if (Math.abs(sum - CELLS) > 1) return;       // reject partial/warmup readbacks
+      for (let k = 0; k < K; k++) territory[k] = totals[k];
+      lastTiles = arr;
+      if (!game.scored) game.scored = true;
+      updateScoreUI(totals);
+    }
+
+    function canTick() {
+      if (game.state !== 'playing') return false;
+      if ((game.tick % READBACK_TICKS === 0) && scorePending) return false;  // wait for the in-flight readback
+      if (net.mode === 'solo') return true;
+      return net.remoteIn.has(game.tick);          // lockstep: wait for the peer's input
+    }
+
+    function pump(realDt) {
+      tickAcc += realDt;
+      let budget = 12;
+      while (tickAcc >= TICK_DT && budget-- > 0 && canTick()) { tickAcc -= TICK_DT; runTick(); }
+      if (tickAcc > 0.25) tickAcc = 0.25;           // clamp so a stall doesn't spiral
+    }
+
+    function animate() {
+      const now = performance.now();
+      const rawDt = (now - lastFrame) / 1000; lastFrame = now;
+      pump(Math.min(0.1, rawDt));                   // advance deterministic ticks (async)
 
       renderer.render(scene, camera);
-      maybeScore(now);
       maybeGpuMs(now);
-      checkLevel(nowSec);
-      updateGameHUD(nowSec);
-      broadcastState(now);   // host → guest HUD/state
-      maybeSendMap(now);     // host → guest ownership picture
+      updateGameHUD(game.tick / TICK_HZ);
+      if (net.mode !== 'solo') netHud();            // 2-player HUD (your faction, opponent, lag)
 
       perf.fps = perf.fps * 0.92 + (rawDt > 0.0005 ? 1 / rawDt : perf.fps) * 0.08;
-      perf.cpu = perf.cpu * 0.9 + (performance.now() - now) * 0.1;   // JS + submit time
-      perf.steps = STEPS;
+      perf.cpu = perf.cpu * 0.9 + (performance.now() - now) * 0.1;
+      perf.steps = STEPS_PER_TICK;
       updatePerf();
     }
     lastFrame = performance.now();
+    let tickAcc = 0;
     newGame();
     renderer.setAnimationLoop(animate);
     document.getElementById('loading').classList.add('hide');
@@ -1471,6 +1498,14 @@
         uBrushActive.value = 1;
         pendingSeed = true;
         setTimeout(() => { uBrushActive.value = 0; }, ms);
+      },
+      // dev: drive the deterministic sim for `ms` of wall time WITHOUT rAF (works
+      // in a backgrounded tab) — MessageChannel yields aren't clamped like timers.
+      _burst: async (ms = 1500) => {
+        const yield0 = () => new Promise((r) => { const ch = new MessageChannel(); ch.port1.onmessage = () => r(); ch.port2.postMessage(0); });
+        const end = performance.now() + ms;
+        while (performance.now() < end) { pump(0.05); renderer.render(scene, camera); await yield0(); }
+        return { tick: game.tick, scored: game.scored, state: game.state, terr: territory.slice(), nut: nut.map((x) => Math.round(x)) };
       },
     };
     console.log('[bloom] ready — backend:', renderer.backend.isWebGPUBackend ? 'WebGPU' : 'other', 'grid', N, 'tiles', TILES);
