@@ -383,9 +383,14 @@
     // Initialise bufA: A=1, B=0, owner=0 everywhere. From M3 the player seeds
     // the field with the brush, so we start neutral (optionally drop a few
     // random B=1 starter disks via the `seeds` arg — used by restart later).
+    // Fixed-point scale: chemicals A,B are stored as INTEGERS 0..FX in the float
+    // slots (floats represent integers exactly up to 2^24). All reaction-diffusion
+    // and combat math is done in integers so the sim is bit-identical on every
+    // GPU — the prerequisite for deterministic 2-player lockstep (no FP drift).
+    const FX = 16384;       // = 1.0 in fixed-point (A,B ∈ [0, FX])
     function seedField(arr, seeds = 0, R = 5) {
       for (let i = 0; i < CELLS; i++) {
-        arr[i * 4 + 0] = 1.0; // A
+        arr[i * 4 + 0] = FX;  // A = 1.0
         arr[i * 4 + 1] = 0.0; // B
         arr[i * 4 + 2] = 0.0; // owner
         arr[i * 4 + 3] = 0.0; // aux
@@ -399,7 +404,7 @@
             const x = (cx + dx + N) % N;
             const y = (cy + dy + N) % N;
             const i = y * N + x;
-            arr[i * 4 + 1] = 1.0; // B = 1 (living)
+            arr[i * 4 + 1] = FX; // B = 1 (living)
           }
         }
       }
@@ -472,20 +477,21 @@
       }
       const owned = step(0.5, c.z);                            // 1 if any faction owns it
       const terr = mix(substrate, tint.mul(0.16), owned);      // faint territory fill
-      let col = mix(terr, tint, smoothstep(0.10, 0.50, c.y));  // bright living worms
+      const B = c.y.div(FX);                                   // fixed-point → [0,1]
+      let col = mix(terr, tint, smoothstep(0.10, 0.50, B));    // bright living worms
       // contested-front shimmer: aux holds a recently-flipped fade timer
       const shimmer = smoothstep(0.05, 1.0, c.w).mul(0.6);
-      col = mix(col, vec3(1.0, 1.0, 1.0), shimmer.mul(c.y.add(0.15)));
+      col = mix(col, vec3(1.0, 1.0, 1.0), shimmer.mul(B.add(0.15)));
 
       // --- 3D lighting (display only): treat chemical B as a height field,
       // derive a normal from neighbouring cells, add diffuse + specular. ---
-      const gx = at(1, 0).y.sub(at(-1, 0).y);
-      const gy = at(0, 1).y.sub(at(0, -1).y);
+      const gx = at(1, 0).y.sub(at(-1, 0).y).div(FX);
+      const gy = at(0, 1).y.sub(at(0, -1).y).div(FX);
       const n = normalize(vec3(gx.mul(-4.5), gy.mul(-4.5), float(1.0)));
       const L = normalize(vec3(0.45, 0.5, 0.72));
       const diff = max(n.dot(L), 0.0);
       const h = normalize(vec3(0.45, 0.5, 1.72));    // half-vector (view = +z)
-      const spec = pow(max(n.dot(h), 0.0), 22.0).mul(smoothstep(0.12, 0.5, c.y));
+      const spec = pow(max(n.dot(h), 0.0), 22.0).mul(smoothstep(0.12, 0.5, B));
       const lit = col.mul(float(0.72).add(diff.mul(0.55))).add(vec3(1.0, 1.0, 1.0).mul(spec.mul(0.4)));
       col = mix(col, lit, uLight);
 
@@ -521,12 +527,17 @@
         const dl = at(xl, yd), dr = at(xr, yd);
 
         // 9-point Laplacian: -1·centre + 0.20·orthogonal + 0.05·diagonal
-        const lapA = c.x.mul(-1.0)
-          .add(l.x.add(r.x).add(u.x).add(d.x).mul(0.20))
-          .add(ul.x.add(ur.x).add(dl.x).add(dr.x).mul(0.05));
-        const lapB = c.y.mul(-1.0)
-          .add(l.y.add(r.y).add(u.y).add(d.y).mul(0.20))
-          .add(ul.y.add(ur.y).add(dl.y).add(dr.y).mul(0.05));
+        // fixed-point reads: A,B are integers 0..FX stored in the float slots
+        const FXi = int(FX), FXf = float(FX);
+        const ax = int(c.x), bx = int(c.y);
+        const Ai = (n) => int(n.x), Bi = (n) => int(n.y);
+        // 9-point Laplacian ×20 (integer): −20·centre + 4·orthogonal + 1·diagonal
+        const L20a = ax.mul(-20)
+          .add(Ai(l).add(Ai(r)).add(Ai(u)).add(Ai(d)).mul(4))
+          .add(Ai(ul).add(Ai(ur)).add(Ai(dl)).add(Ai(dr)));
+        const L20b = bx.mul(-20)
+          .add(Bi(l).add(Bi(r)).add(Bi(u)).add(Bi(d)).mul(4))
+          .add(Bi(ul).add(Bi(ur)).add(Bi(dl)).add(Bi(dr)));
 
         // --- governing faction: strongest OWNED cell among centre + 4 ortho
         // neighbours (mass wins → fronts push). The cell REACTS with this
@@ -547,16 +558,19 @@
         // spread than 4-neighbour, which makes diamonds), centre self-weight 1.5
         // (home advantage). A static per-cell noise raises the bar for claiming
         // NEUTRAL cells only → irregular, organic fronts (combat is unaffected).
-        const cnt = (f) => own(l, f).add(own(r, f)).add(own(u, f)).add(own(d, f))
-          .add(own(ul, f).add(own(ur, f)).add(own(dl, f)).add(own(dr, f)).mul(0.6))
-          .add(own(c, f).mul(1.5));
+        const cnt = (f) => own(l, f).add(own(r, f)).add(own(u, f)).add(own(d, f)).mul(10)
+          .add(own(ul, f).add(own(ur, f)).add(own(dl, f)).add(own(dr, f)).mul(6))
+          .add(own(c, f).mul(15));   // ortho 10, diagonal 6, centre 15 (all integer)
         const cnt1 = cnt(1), cnt2 = cnt(2), cnt3 = cnt(3);
-        const hh = float(x).mul(12.9898).add(float(y).mul(78.233)).sin().mul(43758.5453);
-        const noise = hh.sub(hh.floor());                 // 0..1 static hash
+        // deterministic integer per-cell hash (the old sin() is a transcendental
+        // → non-deterministic across GPUs, fatal for lockstep) → claim bar 0..24
+        const h1 = x.mul(int(311)).add(y.mul(int(733))).mod(int(1024));
+        const h2 = h1.mul(h1).add(x.mul(int(97))).add(y.mul(int(57))).mod(int(1024));
+        const noiseBar = float(h2.mul(int(24)).div(int(1024)));  // 0..23 (×10-weight units)
         const ownedC = step(0.5, c.z);
         let owner = c.z;                                  // sticky default
         let best = ownedC.mul(cnt1.mul(own(c, 1)).add(cnt2.mul(own(c, 2))).add(cnt3.mul(own(c, 3))))
-          .add(ownedC.oneMinus().mul(noise).mul(2.4));     // neutral: irregular claim bar
+          .add(ownedC.oneMinus().mul(noiseBar));           // neutral: irregular claim bar
         let ge = step(best.add(0.5), cnt1); owner = mix(owner, float(1), ge); best = mix(best, cnt1, ge);
         ge = step(best.add(0.5), cnt2);     owner = mix(owner, float(2), ge); best = mix(best, cnt2, ge);
         ge = step(best.add(0.5), cnt3);     owner = mix(owner, float(3), ge); best = mix(best, cnt3, ge);
@@ -576,12 +590,18 @@
           kill = mix(kill, uKill[k], geK);
         }
 
-        const A = c.x, B = c.y;
-        const reaction = A.mul(B).mul(B);
-        const innerA = lapA.mul(uDa).sub(reaction).add(feed.mul(A.oneMinus()));
-        const innerB = lapB.mul(uDb).add(reaction).sub(kill.add(feed).mul(B));
-        const A2 = A.add(innerA.mul(uDt)).clamp(0.0, 1.0);
-        const B2 = B.add(innerB.mul(uDt)).clamp(0.0, 1.0);
+        // feed/kill → fixed-point (lone multiply: no FMA contraction → cross-GPU exact)
+        const Ffix = int(feed.mul(FXf));
+        const Kfix = int(kill.mul(FXf));
+        // reaction a·b²/FX² (staged so each product stays within i32)
+        const ab = ax.mul(bx).div(FXi);
+        const reac = ab.mul(bx).div(FXi);
+        // innerA = Da·lapA − reaction + F·(1−A);  Da=1 → lapA = L20a/20
+        const innerA = L20a.div(int(20)).sub(reac).add(Ffix.mul(FXi.sub(ax)).div(FXi));
+        // innerB = Db·lapB + reaction − (k+F)·B;  Db=0.5 → lapB = L20b/40
+        const innerB = L20b.div(int(40)).add(reac).sub(Kfix.add(Ffix).mul(bx).div(FXi));
+        const A2 = float(ax.add(innerA).max(int(0)).min(FXi));   // dt = 1
+        const B2 = float(bx.add(innerB).max(int(0)).min(FXi));
 
         // aux = contested-front fade timer: 1 on an owner flip, else decays
         const flipped = step(0.5, owner.sub(c.z).abs());
@@ -616,9 +636,9 @@
       // kill the bloom, so seeding into existing pattern is a no-op (matches
       // "seeding into enemy territory is wasteful"). Pure arithmetic mask.
       const inRad = step(rad.mul(rad), d2).oneMinus(); // 1 if d2 < rad²
-      const fresh = step(0.5, c.y).oneMinus();         // 1 if B < 0.5
+      const fresh = step(float(FX * 0.5), c.y).oneMinus(); // 1 if B < 0.5 (fixed-point)
       const doStamp = inRad.mul(fresh);
-      const target = vec4(float(1.0), float(1.0), uBrush.w, c.w);
+      const target = vec4(float(FX), float(FX), uBrush.w, c.w);
       fA.element(i).assign(mix(c, target, doStamp));
     })().compute(CELLS);
 
@@ -894,7 +914,7 @@
       for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
         if (dx * dx + dy * dy > r * r) continue;
         const x = (cx + dx + N) % N, y = (cy + dy + N) % N, i = (y * N + x) * 4;
-        arr[i] = 1; arr[i + 1] = 1; arr[i + 2] = owner;
+        arr[i] = FX; arr[i + 1] = FX; arr[i + 2] = owner;
       }
     }
     function startLevel() {
@@ -902,7 +922,7 @@
       if (game.pvp) { game.activeAIs = game.pvpActive; game.aiControlled = game.pvpAI; }
       else { game.activeAIs = AIS.slice(0, P.aiCount); game.aiControlled = game.activeAIs.slice(); }
       const arr = bufA.array;
-      for (let i = 0; i < CELLS; i++) { arr[i*4]=1; arr[i*4+1]=0; arr[i*4+2]=0; arr[i*4+3]=0; }
+      for (let i = 0; i < CELLS; i++) { arr[i*4]=FX; arr[i*4+1]=0; arr[i*4+2]=0; arr[i*4+3]=0; }
       const spots = [[0.20, 0.80], [0.80, 0.74], [0.50, 0.20]];
       seedDiskCPU((N * spots[0][0]) | 0, (N * spots[0][1]) | 0, BR[1], PLAYER);
       game.activeAIs.forEach((fac, k) => seedDiskCPU((N * spots[k + 1][0]) | 0, (N * spots[k + 1][1]) | 0, BR[1], fac));
