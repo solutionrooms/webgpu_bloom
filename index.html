@@ -107,6 +107,12 @@
       transition: opacity .8s ease; }
     #hint.hide { opacity: 0; }
 
+    #perf { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); display: none;
+      padding: 8px 14px; background: rgba(6,9,15,.9); border: 1px solid rgba(120,160,220,.25);
+      border-radius: 8px; font: 12px/1.55 ui-monospace, Menlo, monospace; color: #9fd0ff; text-align: center; }
+    #perf.show { display: block; }
+    #perf b { color: #fff; }
+
     #loading { position: fixed; inset: 0; display: grid; place-items: center; z-index: 20;
       background: radial-gradient(120% 120% at 50% 30%, #0b1426, #05070a);
       font: 600 40px/1.2 system-ui, sans-serif; color: #cfe3ff; letter-spacing: .04em; }
@@ -159,6 +165,7 @@
 
   <div id="hud">
     <div id="hint">Left-drag to grow your <b style="color:#5dffa6">Coral</b>. Claim the most territory before the timer ends. <b>R</b> restarts.</div>
+    <div id="perf"></div>
     <div id="topbtns">
       <button id="help">How to play</button>
       <button id="techbtn">Technology</button>
@@ -226,9 +233,10 @@
         <li><b>Left-drag</b> the field to seed your pattern; it grows and claims ground.</li>
         <li>The <b>Nutrient meter (top-left)</b> limits how much you can seed: seeding drains it, and it refills over time — faster the more territory you hold. You can't spam — pick your spots.</li>
         <li>Seed <i>open ground ahead of the fronts</i> to out-claim the AI. <b>Brush S / M / L</b> — bigger stamp, more nutrient.</li>
-        <li><b>Scoring:</b> you score most for clearing a level holding <b>~50%</b> — a tight win beats a steamroll, and hoarding (or barely scraping by) scores less. <b>Harder difficulty multiplies your score</b> (Easy ×1, Normal ×2, Hard ×4).</li>
+        <li><b>Scoring:</b> most points for clearing a level holding <b>~50%</b> (a tight win beats a steamroll), <i>plus</i> a bonus for <b>nutrient left over</b> — so don't over-spend. <b>Harder difficulty multiplies your score</b> (Easy ×1, Normal ×2, Hard ×4).</li>
+        <li>You start each level with <b>less nutrient than the last</b> (and less on harder difficulty) — the squeeze tightens as you climb.</li>
         <li>Clear a level by holding the most territory when time runs out (or reaching the win %). Higher levels — and harder difficulty — bring faster, then more, opponents.</li>
-        <li><b>R</b> new game &nbsp;·&nbsp; <b>Space</b> next level &nbsp;·&nbsp; <b>♪</b> ambient sound &nbsp;·&nbsp; <b>⚙</b> settings.</li>
+        <li><b>R</b> new game &nbsp;·&nbsp; <b>Space</b> next level &nbsp;·&nbsp; <b>P</b> performance overlay &nbsp;·&nbsp; <b>♪</b> sound &nbsp;·&nbsp; <b>⚙</b> settings.</li>
       </ul>
       <button id="rules-close">Got it</button>
     </div>
@@ -263,7 +271,7 @@
 
   <script type="module">
     import * as THREE from 'three';
-    import { Fn, uv, vec3, vec4, float, int, uniform, storage, mix, smoothstep, step, instanceIndex, Loop, min } from 'three/tsl';
+    import { Fn, uv, vec3, vec4, float, int, uniform, storage, mix, smoothstep, step, instanceIndex, Loop, min, max, pow, normalize } from 'three/tsl';
 
     const $ = (id) => document.getElementById(id);
 
@@ -366,6 +374,7 @@
     const uN = uniform(float(N));
     const uScale = uniform(new THREE.Vector2(1, 1)); // aspect correction (set on resize)
     const uClaim = uniform(1); // 1 on claim-steps (territory may spread into neutral), else 0
+    const uLight = uniform(0.6); // 3D lighting intensity (display only; 0 = flat)
     // Gray-Scott / diffusion constants (Karl Sims tutorial values — known-good).
     const uDa = uniform(float(1.0));    // diffusion of A
     const uDb = uniform(float(0.5));    // diffusion of B
@@ -410,8 +419,10 @@
       const inside = step(p.x.abs(), 0.5).mul(step(p.y.abs(), 0.5));
       const fuv = p.add(0.5).clamp(0.0, 0.99999);
       const cell = fuv.mul(uN).floor();
-      const i = int(cell.y.mul(uN).add(cell.x));
-      const c = fA.element(i);                        // vec4 (A,B,owner,aux)
+      const cx = cell.x, cy = cell.y;
+      const at = (ox, oy) => fA.element(int(
+        cy.add(oy).add(uN).mod(uN).mul(uN).add(cx.add(ox).add(uN).mod(uN))));
+      const c = at(0, 0);                              // vec4 (A,B,owner,aux)
       let tint = uColor[0];
       for (let k = 1; k < FACTIONS.length; k++) {
         tint = mix(tint, uColor[k], step(float(k - 0.5), c.z)); // owner >= k
@@ -422,6 +433,19 @@
       // contested-front shimmer: aux holds a recently-flipped fade timer
       const shimmer = smoothstep(0.05, 1.0, c.w).mul(0.6);
       col = mix(col, vec3(1.0, 1.0, 1.0), shimmer.mul(c.y.add(0.15)));
+
+      // --- 3D lighting (display only): treat chemical B as a height field,
+      // derive a normal from neighbouring cells, add diffuse + specular. ---
+      const gx = at(1, 0).y.sub(at(-1, 0).y);
+      const gy = at(0, 1).y.sub(at(0, -1).y);
+      const n = normalize(vec3(gx.mul(-4.5), gy.mul(-4.5), float(1.0)));
+      const L = normalize(vec3(0.45, 0.5, 0.72));
+      const diff = max(n.dot(L), 0.0);
+      const h = normalize(vec3(0.45, 0.5, 1.72));    // half-vector (view = +z)
+      const spec = pow(max(n.dot(h), 0.0), 22.0).mul(smoothstep(0.12, 0.5, c.y));
+      const lit = col.mul(float(0.72).add(diff.mul(0.55))).add(vec3(1.0, 1.0, 1.0).mul(spec.mul(0.4)));
+      col = mix(col, lit, uLight);
+
       return vec4(mix(letterbox, col, inside), 1.0);
     })();
 
@@ -476,11 +500,20 @@
         // clearly surrounds a cell. A neutral cell next to a faction is claimed
         // (flood-fill), giving wide recipe support so blooms grow (don't starve).
         const own = (n, f) => step(f - 0.5, n.z).sub(step(f + 0.5, n.z)); // 1 if n owned by f
-        const cnt = (f) => own(c, f).add(own(l, f)).add(own(r, f)).add(own(u, f)).add(own(d, f));
+        // Count owned neighbours: orthogonal weight 1, diagonal 0.6 (rounder
+        // spread than 4-neighbour, which makes diamonds), centre self-weight 1.5
+        // (home advantage). A static per-cell noise raises the bar for claiming
+        // NEUTRAL cells only → irregular, organic fronts (combat is unaffected).
+        const cnt = (f) => own(l, f).add(own(r, f)).add(own(u, f)).add(own(d, f))
+          .add(own(ul, f).add(own(ur, f)).add(own(dl, f)).add(own(dr, f)).mul(0.6))
+          .add(own(c, f).mul(1.5));
         const cnt1 = cnt(1), cnt2 = cnt(2), cnt3 = cnt(3);
-        const centerCnt = cnt1.mul(own(c, 1)).add(cnt2.mul(own(c, 2))).add(cnt3.mul(own(c, 3)));
-        let owner = c.z;                         // sticky default (home advantage)
-        let best = centerCnt;
+        const hh = float(x).mul(12.9898).add(float(y).mul(78.233)).sin().mul(43758.5453);
+        const noise = hh.sub(hh.floor());                 // 0..1 static hash
+        const ownedC = step(0.5, c.z);
+        let owner = c.z;                                  // sticky default
+        let best = ownedC.mul(cnt1.mul(own(c, 1)).add(cnt2.mul(own(c, 2))).add(cnt3.mul(own(c, 3))))
+          .add(ownedC.oneMinus().mul(noise).mul(2.4));     // neutral: irregular claim bar
         let ge = step(best.add(0.5), cnt1); owner = mix(owner, float(1), ge); best = mix(best, cnt1, ge);
         ge = step(best.add(0.5), cnt2);     owner = mix(owner, float(2), ge); best = mix(best, cnt2, ge);
         ge = step(best.add(0.5), cnt3);     owner = mix(owner, float(3), ge); best = mix(best, cnt3, ge);
@@ -702,7 +735,7 @@
 
     // GPU-ms readout (timestamp API; guarded — ignore absurd values from a
     // throttled/backgrounded tab). Report GPU ms, not FPS (which is vsync-capped).
-    let lastGpu = 0, gpuPending = false;
+    let lastGpu = 0, gpuPending = false, gpuMsVal = 0;
     function maybeGpuMs(nowMs) {
       if (gpuPending || nowMs - lastGpu < 500) return;
       lastGpu = nowMs; gpuPending = true;
@@ -710,9 +743,21 @@
         .then(() => renderer.resolveTimestampsAsync(THREE.TimestampQuery.COMPUTE))
         .then((ms) => {
           gpuPending = false;
-          if (typeof ms === 'number' && ms > 0 && ms < 2000) $('gpums').textContent = ms.toFixed(2) + ' ms';
+          if (typeof ms === 'number' && ms > 0 && ms < 2000) { gpuMsVal = ms; $('gpums').textContent = ms.toFixed(2) + ' ms'; }
         })
         .catch(() => { gpuPending = false; });
+    }
+
+    // Performance overlay (toggle with P) — FPS, CPU frame time, GPU compute ms.
+    const perf = { fps: 60, cpu: 0, steps: 6, on: false };
+    const $perf = document.getElementById('perf');
+    function updatePerf() {
+      if (!perf.on) return;
+      $perf.innerHTML =
+        'FPS <b>' + perf.fps.toFixed(0) + '</b>  ·  frame <b>' + (1000 / Math.max(1, perf.fps)).toFixed(1) + ' ms</b><br>' +
+        'CPU <b>' + perf.cpu.toFixed(2) + ' ms</b>  ·  GPU(compute) <b>' + gpuMsVal.toFixed(2) + ' ms</b><br>' +
+        'grid <b>' + N + '²</b>  ·  ' + perf.steps + ' steps/frame  ·  ' + TILES + ' score tiles<br>' +
+        'backend <b>' + (renderer.backend.isWebGPUBackend ? 'WebGPU' : 'WebGL') + '</b>';
     }
 
     // ---------------------------------------------------------------------------
@@ -729,13 +774,15 @@
       aiInterval: 2.8, aiSeedCost: 40,                         // AI economy (levels ramp these up)
       winPct: 75, roundSecs: 50, spread: 9,                    // match (spread = cells/sec)
       difficulty: 1,                                           // index into DIFF
+      light: 65,                                               // 3D lighting 0–100 (display only)
+      speed: 6,                                                // RD steps/frame (pattern liveliness; even)
     };
     const cfg = { ...DEFAULTS };
     // Difficulty: stronger AI AND a bigger score multiplier on the harder ones.
     const DIFF = [
-      { name: 'Easy',   ai: 0.7, score: 1 },
-      { name: 'Normal', ai: 1.0, score: 2 },
-      { name: 'Hard',   ai: 1.5, score: 4 },
+      { name: 'Easy',   ai: 0.7, score: 1, startNut: 1.15 },
+      { name: 'Normal', ai: 1.0, score: 2, startNut: 1.0 },
+      { name: 'Hard',   ai: 1.5, score: 4, startNut: 0.78 },
     ];
 
     // Per-level difficulty ramp derived from cfg. Higher levels: more, faster,
@@ -749,6 +796,9 @@
         aiSeedCost: Math.max(8, cfg.aiSeedCost - 3 * t),
         aiRegenMul: (1 + 0.18 * t) * ai,                              // AIs get richer each level / difficulty
         spread: cfg.spread * (1 + 0.08 * t),
+        // you start each level with less nutrient — less the higher the level,
+        // and less on harder difficulty
+        startFrac: Math.max(0.3, 1 - 0.08 * t) * ((DIFF[cfg.difficulty] || DIFF[1]).startNut),
         nutMax: cfg.nutMax, nutRegen: cfg.nutRegen, nutPerTerr: cfg.nutPerTerr,
         seedCost: cfg.seedCost, winPct: cfg.winPct, roundSecs: cfg.roundSecs,
       };
@@ -795,7 +845,7 @@
       bufA.needsUpdate = true;
       territory.fill(0); territory[0] = CELLS;   // assume all-neutral until first readback
       scoreGen++;                                // invalidate any in-flight readback
-      nut.fill(P.nutMax);
+      nut.fill(P.nutMax); nut[PLAYER] = P.nutMax * P.startFrac;  // you start each level with less
       game.state = 'playing'; game.winner = 0; game.claimAcc = 0; game.scored = false;
       game.tStart = performance.now();
       game.aiNext = game.activeAIs.map((_, k) => P.aiInterval * (0.4 + 0.4 * k));
@@ -845,10 +895,11 @@
       const eff = Math.max(0, 1 - Math.abs(pPct - 50) / 50);
       const mul = (DIFF[cfg.difficulty] || DIFF[1]).score;
       const timeBonus = Math.round(Math.max(0, game.P.roundSecs - nowSec));
-      const bonus = Math.round((game.level * 60 + 300 * eff + timeBonus) * mul);
+      const nutLeft = Math.round(nut[PLAYER]);                  // reward conserving nutrient
+      const bonus = Math.round((game.level * 60 + 300 * eff + timeBonus + nutLeft) * mul);
       game.score += bonus; game.state = 'cleared'; $score.textContent = game.score;
       showBanner('Level ' + game.level + ' cleared', cssColor(FACTIONS[PLAYER].color),
-        reason + '<br>' + pctLine() + '<br>+' + bonus + ' &nbsp;(×' + mul + ')' +
+        reason + '<br>' + pctLine() + '<br>+' + bonus + ' &nbsp;·&nbsp; ' + nutLeft + ' nutrient left &nbsp;·&nbsp; ×' + mul +
         '<br><span class="dim">advancing… (Space)</span>');
       game.level++;
       setTimeout(() => { if (game.state === 'cleared') startLevel(); }, 2600);
@@ -889,12 +940,14 @@
       $score.textContent = game.score;
       const d = DIFF[cfg.difficulty] || DIFF[1];
       $diff.textContent = d.name + ' ×' + d.score;
+      uLight.value = cfg.light / 100;   // apply 3D-lighting setting
     }
 
     window.addEventListener('keydown', (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
       if (e.key === 'r' || e.key === 'R') newGame();
       else if ((e.key === ' ' || e.key === 'Enter') && game.state === 'cleared') startLevel();
+      else if (e.key === 'p' || e.key === 'P') { perf.on = !perf.on; $perf.classList.toggle('show', perf.on); if (!perf.on) $perf.innerHTML = ''; }
     });
 
     // ---------------------------------------------------------------------------
@@ -912,7 +965,10 @@
       { sec: 'Match' },
       { key: 'winPct', label: 'Win at % territory', min: 30, max: 100, step: 5 },
       { key: 'roundSecs', label: 'Round length (s)', min: 20, max: 240, step: 5 },
-      { key: 'spread', label: 'Spread speed', min: 4, max: 60, step: 1 },
+      { key: 'spread', label: 'Territory spread speed', min: 4, max: 60, step: 1 },
+      { sec: 'Visuals & performance' },
+      { key: 'light', label: '3D lighting', min: 0, max: 100, step: 5 },
+      { key: 'speed', label: 'Pattern speed (FPS cost)', min: 2, max: 12, step: 2 },
     ];
     const $settings = document.getElementById('settings');
     function buildSettings() {
@@ -1017,7 +1073,8 @@
     // ---------------------------------------------------------------------------
     function animate() {
       const now = performance.now();
-      const dt = Math.min(0.05, (now - lastFrame) / 1000); lastFrame = now;
+      const rawDt = (now - lastFrame) / 1000;
+      const dt = Math.min(0.05, rawDt); lastFrame = now;
       const nowSec = (now - game.tStart) / 1000;
 
       const P = game.P;
@@ -1050,11 +1107,13 @@
       }
       pendingSeed = false;
 
-      // RD: 2 steps every frame (smooth, even → ends in bufA). Territory only
-      // advances on "claim frames", metered to ≈ spread cells/sec — slow &
-      // strategic. uClaim is set ONCE per frame so both steps read the same
-      // value (toggling it between the two compute calls is not reliable).
-      const STEPS = 2;
+      // RD: several steps per frame (even → ends in bufA) so the chemistry is
+      // lively and forms worm/spot texture. Territory claim is metered PER STEP
+      // to ≈ spread cells/sec, so the strategic spread stays slow & smooth and
+      // is decoupled from the RD speed.
+      let STEPS = cfg.speed | 0; if (STEPS < 2) STEPS = 2; if (STEPS & 1) STEPS++; // even RD steps/frame
+      // Per-step uClaim toggling is unreliable, so gate the whole frame: on a
+      // claim-frame all STEPS steps spread, metered to ≈ spread cells/sec.
       game.claimAcc += (live ? P.spread : 0) * dt;
       const claimFrame = game.claimAcc >= STEPS;
       if (claimFrame) game.claimAcc -= STEPS;
@@ -1066,6 +1125,11 @@
       maybeGpuMs(now);
       checkLevel(nowSec);
       updateGameHUD(nowSec);
+
+      perf.fps = perf.fps * 0.92 + (rawDt > 0.0005 ? 1 / rawDt : perf.fps) * 0.08;
+      perf.cpu = perf.cpu * 0.9 + (performance.now() - now) * 0.1;   // JS + submit time
+      perf.steps = STEPS;
+      updatePerf();
     }
     lastFrame = performance.now();
     newGame();
