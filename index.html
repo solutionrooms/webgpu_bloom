@@ -871,6 +871,7 @@
       level: 1, score: 0, winner: 0, tStart: 0, claimAcc: 0, scored: false,
       P: levelParams(1), activeAIs: [AIS[0]], aiControlled: [AIS[0]], aiNext: [],
       pvp: false, pvpActive: [2], pvpAI: [], netMsg: '',
+      dry: {},                   // per-faction "out of nutrient" latch (hysteresis)
     };
     const nut = new Float32Array(K);  // nutrient per faction (index 0 unused)
     const aiSeeds = [];
@@ -909,12 +910,23 @@
       territory.fill(0); territory[0] = CELLS;   // assume all-neutral until first readback
       scoreGen++;                                // invalidate any in-flight readback
       nut.fill(P.nutMax); nut[PLAYER] = P.nutMax * P.startFrac;  // you start each level with less
-      game.state = 'playing'; game.winner = 0; game.claimAcc = 0; game.scored = false;
+      game.state = 'playing'; game.winner = 0; game.claimAcc = 0; game.scored = false; game.dry = {};
       game.tStart = performance.now();
       game.aiNext = game.activeAIs.map((_, k) => P.aiInterval * (0.4 + 0.4 * k));
       $banner.classList.remove('show');
     }
     function newGame() { game.level = 1; game.score = 0; startLevel(); }
+
+    // Nutrient gate with hysteresis. The per-frame seed cost is tiny and
+    // nutrient regenerates every frame, so a naive `nut >= cost` check lets a
+    // depleted faction trickle-seed forever (bar reads 0 but painting works).
+    // Latch "dry" when it bottoms out; only clear it once the bar has recharged
+    // past ~10% — so an empty bar genuinely stops painting until it refills.
+    function canSeed(f, cost) {
+      if (nut[f] >= game.P.nutMax * 0.10) game.dry[f] = false;
+      if (nut[f] < cost) game.dry[f] = true;
+      return !game.dry[f] && nut[f] >= cost;
+    }
 
     function aiPickTarget() {  // seed neutral ground, biased toward the CENTRE so
       const cC = N * 0.5;       // the AI actively contests the valuable middle
@@ -1357,11 +1369,12 @@
       // visible/interactive. RD still churns the starters during warmup.
       const live = game.state === 'playing' && game.scored;
       if (live) {
-        // nutrient regen ∝ territory, for every active faction (AIs get richer
-        // each level via aiRegenMul → the ramp)
+        // nutrient regen ∝ territory. Only AI-controlled factions get the
+        // aiRegenMul ramp; humans (the player AND a 2-player guest) regen at the
+        // base rate so PvP is fair.
         for (const f of [PLAYER, ...game.activeAIs]) {
           const frac = (territory[f] || 0) / CELLS;
-          const mul = f === PLAYER ? 1 : P.aiRegenMul;
+          const mul = game.aiControlled.includes(f) ? P.aiRegenMul : 1;
           nut[f] = Math.min(P.nutMax, nut[f] + (P.nutRegen + P.nutPerTerr * frac) * mul * dt);
         }
 
@@ -1377,14 +1390,14 @@
         // player seeding — gated by nutrient (cost ∝ brush area)
         const wantSeed = (uBrushActive.value > 0.5 || pendingSeed) && Math.round(uBrush.value.w) === PLAYER;
         const cost = P.seedCost * (uBrush.value.z * uBrush.value.z) / (BR[1] * BR[1]) * dt;
-        if (wantSeed && nut[PLAYER] >= cost) { renderer.compute(seedA); nut[PLAYER] -= cost; }
+        if (wantSeed && canSeed(PLAYER, cost)) { renderer.compute(seedA); nut[PLAYER] -= cost; }
 
         // host applies the guest's seeds as Bloom (faction 2), gated by nut[2]
         if (net.mode === 'host' && net.guestDown && net.guestSeed) {
           const pb = uBrush.value.clone();
           if (brushSetUV(net.guestSeed.u, net.guestSeed.v, 2)) {
             const gc = P.seedCost * dt;
-            if (nut[2] >= gc) { renderer.compute(seedA); nut[2] -= gc; }
+            if (canSeed(2, gc)) { renderer.compute(seedA); nut[2] -= gc; }
           }
           uBrush.value.copy(pb);
         }
