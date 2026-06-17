@@ -537,10 +537,11 @@
     // ice poles. The sim is untouched; this is purely a different camera + mesh.
     // ---------------------------------------------------------------------------
     const ice1 = vec3(0.60, 0.78, 0.98), ice2 = vec3(0.86, 0.94, 1.0);
-    const globeMat = new THREE.MeshBasicNodeMaterial({
-      transparent: true, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
-    });
-    globeMat.colorNode = Fn(() => {
+    const uGlobeAlpha = uniform(1);               // overall opacity (transparency slider)
+    // field → colour + PER-PIXEL alpha: empty substrate is mostly see-through,
+    // worms and ice stay solid → the globe reads as glass and you see the far
+    // side through it. (Built fresh per material so front/back don't share a node.)
+    const globeColorNode = () => Fn(() => {
       const guv = uv();                              // sphere UV: x=longitude, y=latitude
       const cell = guv.mul(uN).floor();
       const cx = cell.x, cy = cell.y;
@@ -568,10 +569,23 @@
       const frost = smoothstep(float(WARM_ROW), float(CAP_ROW), latD);
       col = mix(col, ice1, frost.mul(frost).mul(0.92));
       col = mix(col, ice2, step(float(CAP_ROW), latD).mul(0.55));
-      return vec4(col, 1.0);                         // additive blend → glowing glass globe
+      // alpha: faint glass shell, opaque where there's life or ice
+      const life = smoothstep(0.06, 0.42, B);
+      const a = float(0.16).add(owned.mul(0.10)).add(life.mul(0.70)).add(frost.mul(0.55)).min(1.0).mul(uGlobeAlpha);
+      return vec4(col, a);
     })();
-    const globe = new THREE.Mesh(new THREE.SphereGeometry(1, 128, 80), globeMat);
-    globe.visible = false;
+    const globeGeo = new THREE.SphereGeometry(1, 128, 80);
+    const mkGlobeMat = (sideMode) => {
+      const m = new THREE.MeshBasicNodeMaterial({ transparent: true, side: sideMode, depthWrite: false, blending: THREE.NormalBlending });
+      m.colorNode = globeColorNode();
+      return m;
+    };
+    // Render the BACK hemisphere first, the FRONT over it → correct front-over-back
+    // glass (one double-sided mesh can't depth-sort its own faces).
+    const globe = new THREE.Group(); globe.visible = false;
+    const globeBack = new THREE.Mesh(globeGeo, mkGlobeMat(THREE.BackSide)); globeBack.renderOrder = 1;
+    const globeFront = new THREE.Mesh(globeGeo, mkGlobeMat(THREE.FrontSide)); globeFront.renderOrder = 2;
+    globe.add(globeBack, globeFront);
     scene.add(globe);
     const perspCam = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.1, 100);
     perspCam.position.set(0, 0.9, 2.9); perspCam.lookAt(0, 0, 0);   // slight downward tilt
@@ -581,6 +595,13 @@
       globeMode = on; globe.visible = on; quad.visible = !on;
       document.getElementById('globebtn').classList.toggle('on', on);
       document.getElementById('globerot').classList.toggle('show', on);
+    }
+    // apply the visual settings (camera tilt + transparency) — called on init and
+    // whenever the Globe-visuals sliders change.
+    function applyGlobeView() {
+      const d = 3.04, t = (cfg.tilt || 0) * Math.PI / 180;
+      perspCam.position.set(0, d * Math.sin(t), d * Math.cos(t)); perspCam.lookAt(0, 0, 0);
+      uGlobeAlpha.value = Math.max(0.12, 1 - (cfg.globeTransp || 0) * 0.008);   // 0→solid, 100→ghostly
     }
     {  // hold-to-spin buttons (touch + mouse): ◀ spins left, ▶ spins right
       const hold = (d) => (e) => { globeHold = d; e.preventDefault(); };
@@ -815,11 +836,11 @@
     function setBrushFromEvent(e) {
       const rect = canvas.getBoundingClientRect();
       if (globeMode) {         // raycast the cursor onto the sphere → field cell
-        globe.updateMatrixWorld();
+        globe.updateMatrixWorld(true);
         const ndc = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1,
           -(((e.clientY - rect.top) / rect.height) * 2 - 1));
         raycaster.setFromCamera(ndc, perspCam);
-        const hit = raycaster.intersectObject(globe)[0];
+        const hit = raycaster.intersectObject(globe, true)[0];
         if (!hit || !hit.uv) { brushHit = false; return; }   // clicked off the globe
         uBrush.value.x = Math.max(0, Math.min(N - 1, Math.floor(hit.uv.x * N)));
         uBrush.value.y = Math.max(0, Math.min(N - 1, Math.floor(hit.uv.y * N)));
@@ -971,6 +992,7 @@
       difficulty: 1,                                           // index into DIFF
       light: 65,                                               // 3D lighting 0–100 (display only)
       speed: 6,                                                // RD steps/frame (pattern liveliness; even)
+      rotSpeed: 17, tilt: 17, globeTransp: 20,                 // globe view: spin / camera tilt / transparency
     };
     const cfg = { ...DEFAULTS };
     // Difficulty: stronger AI AND a bigger score multiplier on the harder ones.
@@ -1233,6 +1255,10 @@
       { sec: 'Visuals & performance' },
       { key: 'light', label: '3D lighting', min: 0, max: 100, step: 5 },
       { key: 'speed', label: 'Pattern speed (FPS cost)', min: 2, max: 12, step: 2 },
+      { sec: 'Globe view' },
+      { key: 'rotSpeed', label: 'Spin speed', min: 0, max: 100, step: 5 },
+      { key: 'tilt', label: 'Tilt angle', min: 0, max: 60, step: 2, apply: 'globe' },
+      { key: 'globeTransp', label: 'Transparency', min: 0, max: 100, step: 5, apply: 'globe' },
     ];
     const $settings = document.getElementById('settings');
     function buildSettings() {
@@ -1246,11 +1272,12 @@
         const inp = document.createElement('input'); inp.type = 'range';
         inp.min = s.min; inp.max = s.max; inp.step = s.step; inp.value = cfg[s.key];
         const show = () => { val.textContent = s.dec ? (+cfg[s.key]).toFixed(s.dec) : cfg[s.key]; };
-        inp.addEventListener('input', () => { cfg[s.key] = parseFloat(inp.value); show(); });
+        inp.addEventListener('input', () => { cfg[s.key] = parseFloat(inp.value); show(); if (s.apply === 'globe') applyGlobeView(); });
         show(); top.append(name, val); row.append(top, inp); body.appendChild(row);
       }
     }
     buildSettings();
+    applyGlobeView();   // apply initial globe tilt + transparency
     const diffsel = document.getElementById('diffsel'); diffsel.selectedIndex = cfg.difficulty;
     diffsel.addEventListener('change', () => { cfg.difficulty = diffsel.selectedIndex; });
     const gridsel = document.getElementById('gridsel'); gridsel.value = String(N);
@@ -1258,7 +1285,7 @@
     document.getElementById('gear').addEventListener('click', () => $settings.classList.toggle('show'));
     document.getElementById('s-close').addEventListener('click', () => $settings.classList.remove('show'));
     document.getElementById('s-restart').addEventListener('click', () => { $settings.classList.remove('show'); newGame(); });
-    document.getElementById('s-defaults').addEventListener('click', () => { Object.assign(cfg, DEFAULTS); buildSettings(); diffsel.selectedIndex = cfg.difficulty; });
+    document.getElementById('s-defaults').addEventListener('click', () => { Object.assign(cfg, DEFAULTS); buildSettings(); applyGlobeView(); diffsel.selectedIndex = cfg.difficulty; });
     const $rules = document.getElementById('rules');
     document.getElementById('help').addEventListener('click', () => $rules.classList.toggle('show'));
     document.getElementById('rules-close').addEventListener('click', () => $rules.classList.remove('show'));
@@ -1590,7 +1617,7 @@
       if (globeMode) {                              // spin the globe (display-only; never affects the sim)
         const dt = Math.min(0.1, rawDt);
         globeVel += globeHold * 3 * dt;             // hold-to-spin buttons
-        globeSpin += (0.05 + globeVel) * dt;        // gentle idle auto-spin + input
+        globeSpin += (cfg.rotSpeed * 0.003 + globeVel) * dt;   // idle auto-spin (slider) + input
         globeVel *= 0.94;
         globe.rotation.y = globeSpin;
       }
